@@ -30,9 +30,26 @@ pub enum IncomingMessage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutgoingMessage {
-    Connected { version: &'static str },
-    Error { msg: String },
-    WindowCreated { window_id: u64, title: String },
-    WindowDestroyed { window_id: u64 },
-    TitleChanged { window_id: u64, title: String },
+    Connected {
+        version: &'static str,
+    },
+    Error {
+        msg: String,
+    },
+    WindowCreated {
+        window_id: u64,
+        title: String,
+    },
+    WindowDestroyed {
+        window_id: u64,
+    },
+    TitleChanged {
+        window_id: u64,
+        title: String,
+    },
+    /// Emacs surface logical size (so Emacs can compute header offset).
+    SurfaceSize {
+        width: i32,
+        height: i32,
+    },
 }

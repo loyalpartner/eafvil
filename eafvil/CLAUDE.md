@@ -6,7 +6,9 @@
 
 ## Architecture
 - Nested Wayland compositor using smithay, hosting Emacs inside a winit window
-- Single-window constraint: only one Emacs toplevel allowed
+- First toplevel = Emacs (fullscreen), subsequent toplevels = EAF app windows managed by AppManager
+- IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, forward_key. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed
+- Elisp client: `mvp/elisp/eaf-eafvil.el` — auto-connects via parent PID socket discovery, syncs geometry on `window-size-change-functions` with change-detection guard
 - grabs/ directory is placeholder code for future move/resize support
 
 ## Key Gotchas
@@ -19,6 +21,10 @@
 - GTK3 Emacs does NOT support xdg-decoration protocol — setting `Fullscreen` state on the toplevel is what actually hides CSD titlebar/borders
 - GTK4/GTK3 will send `unmaximize_request`/`unfullscreen_request` immediately on connect if those states are set in initial configure — must ignore these for single-window compositor
 - Host keyboard layout: smithay winit backend does NOT expose the host's keymap. Use `wayland-client` to separately connect, receive `wl_keyboard.keymap`, then `KeyboardHandle::set_keymap_from_string()` — env vars (`XKB_DEFAULT_*`) are unreliable on KDE Wayland
+- pgtk Emacs: `frame-geometry` returns 0 for `menu-bar-size` (GTK external menu-bar architectural limitation, not a bug). Compute exact bar height via compositor IPC: `offset = surface_height - frame-pixel-height`
+- `window-pixel-edges` is relative to native frame (excludes external menu-bar/toolbar); `window-body-pixel-edges` bottom = top of mode-line
+- EAF app windows must be mapped to space at 1×1 in `new_toplevel` (otherwise on_commit and initial configure don't fire); actual size arrives via `set_geometry` IPC
+- Host resize must only resize the Emacs surface; EAF app window sizes are controlled by Emacs via IPC
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)

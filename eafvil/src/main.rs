@@ -1,5 +1,4 @@
-#![allow(irrefutable_let_patterns)]
-
+pub mod apps;
 mod grabs;
 mod handlers;
 mod input;
@@ -45,19 +44,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("IPC socket path: {}", ipc_path.display());
 
     let ipc = crate::ipc::IpcServer::bind(ipc_path)?;
-    let mut state = EafvilState::new(&mut event_loop, display, ipc);
+    let mut state = EafvilState::new(&mut event_loop, display, ipc)?;
 
     // Inherit the host compositor's keyboard layout
     match keymap::read_host_keymap() {
         Some(host_keymap) => {
             tracing::info!("Loaded host keyboard keymap ({} bytes)", host_keymap.len());
-            if let Err(e) = state
-                .seat
-                .get_keyboard()
-                .unwrap()
-                .set_keymap_from_string(&mut state, host_keymap)
-            {
-                tracing::warn!("Failed to apply host keymap: {e:?}, using default");
+            if let Some(kb) = state.seat.get_keyboard() {
+                if let Err(e) = kb.set_keymap_from_string(&mut state, host_keymap) {
+                    tracing::warn!("Failed to apply host keymap: {e:?}, using default");
+                }
             }
         }
         None => tracing::info!("Could not read host keymap, using default"),
@@ -73,6 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if dup_fd < 0 {
             return Err("dup(ipc listener fd) failed".into());
         }
+        // SAFETY: dup_fd is a valid open fd (dup succeeded above, dup_fd >= 0).
+        // Ownership transfers to File; the original listener_fd stays open in IpcServer.
         let file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
         event_loop
             .handle()
@@ -97,6 +95,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::info!("Emacs exited with {status}, stopping compositor");
                 state.loop_signal.stop();
             }
+        }
+
+        // Clean up EAF app windows whose Wayland surface was destroyed.
+        for app in state.apps.drain_dead() {
+            state.space.unmap_elem(&app.window);
+            state.ipc.send(ipc::OutgoingMessage::WindowDestroyed {
+                window_id: app.window_id,
+            });
+            tracing::info!("EAF app window_id={} destroyed", app.window_id);
         }
 
         // Dispatch incoming IPC messages from Emacs.
@@ -143,7 +150,7 @@ fn default_ipc_path() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{runtime_dir}/eafvil-{pid}.ipc"))
 }
 
-fn handle_ipc_message(_state: &mut EafvilState, msg: ipc::IncomingMessage) {
+fn handle_ipc_message(state: &mut EafvilState, msg: ipc::IncomingMessage) {
     use ipc::IncomingMessage;
     match msg {
         IncomingMessage::SetGeometry {
@@ -153,25 +160,67 @@ fn handle_ipc_message(_state: &mut EafvilState, msg: ipc::IncomingMessage) {
             w,
             h,
         } => {
-            tracing::debug!("IPC set_geometry window={window_id} ({x},{y},{w},{h})");
-            // M2 will wire this to surface configure.
+            ipc_set_geometry(state, window_id, x, y, w, h);
         }
         IncomingMessage::Close { window_id } => {
-            tracing::debug!("IPC close window={window_id}");
+            ipc_close(state, window_id);
         }
         IncomingMessage::SetVisibility { window_id, visible } => {
-            tracing::debug!("IPC set_visibility window={window_id} visible={visible}");
+            ipc_set_visibility(state, window_id, visible);
         }
         IncomingMessage::ForwardKey {
             window_id,
             keycode,
-            state,
+            state: key_state,
             modifiers,
         } => {
             tracing::debug!(
-                "IPC forward_key window={window_id} key={keycode} state={state} mods={modifiers}"
+                "IPC forward_key window={window_id} key={keycode} state={key_state} mods={modifiers}"
             );
+            // TODO: inject wl_keyboard.key into target surface.
         }
+    }
+}
+
+fn ipc_set_geometry(state: &mut EafvilState, window_id: u64, x: i32, y: i32, w: i32, h: i32) {
+    tracing::debug!("IPC set_geometry window={window_id} ({x},{y},{w},{h})");
+    let maybe_window = state.apps.get_mut(window_id).map(|app| {
+        app.geometry = Some(smithay::utils::Rectangle::new((x, y).into(), (w, h).into()));
+        app.visible = true;
+        if let Some(toplevel) = app.window.toplevel() {
+            toplevel.with_pending_state(|s| {
+                s.size = Some((w, h).into());
+            });
+            toplevel.send_pending_configure();
+        }
+        app.window.clone()
+    });
+    if let Some(window) = maybe_window {
+        state.space.map_element(window, (x, y), false);
+    }
+}
+
+fn ipc_close(state: &mut EafvilState, window_id: u64) {
+    tracing::debug!("IPC close window={window_id}");
+    if let Some(app) = state.apps.get_mut(window_id) {
+        if let Some(toplevel) = app.window.toplevel() {
+            toplevel.send_close();
+        }
+    }
+}
+
+fn ipc_set_visibility(state: &mut EafvilState, window_id: u64, visible: bool) {
+    tracing::debug!("IPC set_visibility window={window_id} visible={visible}");
+    let Some(app) = state.apps.get_mut(window_id) else {
+        return;
+    };
+    app.visible = visible;
+    let win = app.window.clone();
+    let geo = app.geometry;
+    if !visible {
+        state.space.unmap_elem(&win);
+    } else if let Some(geo) = geo {
+        state.space.map_element(win, geo.loc, false);
     }
 }
 

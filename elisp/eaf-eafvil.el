@@ -1,5 +1,7 @@
 ;;; eaf-eafvil.el --- Emacs IPC client for the eafvil Wayland compositor  -*- lexical-binding: t; -*-
 
+(require 'json)
+
 ;; ---------------------------------------------------------------------------
 ;; Customization
 ;; ---------------------------------------------------------------------------
@@ -23,6 +25,13 @@
 
 (defvar eaf-eafvil--read-buf ""
   "Accumulates raw bytes received from eafvil.")
+
+(defvar eaf-eafvil--header-offset nil
+  "Pixel height of external GTK bars (menu-bar + tool-bar).
+Computed once from compositor-reported surface height.")
+
+(defvar-local eaf-eafvil--window-id nil
+  "eafvil window_id for the EAF app embedded in this buffer.")
 
 ;; ---------------------------------------------------------------------------
 ;; Socket discovery
@@ -54,8 +63,9 @@
     (concat prefix json)))
 
 (defun eaf-eafvil--decode-next ()
-  "Try to extract one complete message from `eaf-eafvil--read-buf'.
-Returns the parsed JSON object (as a hash-table) or nil if not enough data."
+  "Extract one complete message from `eaf-eafvil--read-buf'.
+Returns parsed JSON (hash-table) or nil if more data is needed.
+Coerces buffer to unibyte so aref always yields raw byte values 0-255."
   (when (>= (length eaf-eafvil--read-buf) 4)
     (let* ((b0 (aref eaf-eafvil--read-buf 0))
            (b1 (aref eaf-eafvil--read-buf 1))
@@ -63,9 +73,11 @@ Returns the parsed JSON object (as a hash-table) or nil if not enough data."
            (b3 (aref eaf-eafvil--read-buf 3))
            (len (+ b0 (ash b1 8) (ash b2 16) (ash b3 24))))
       (when (>= (length eaf-eafvil--read-buf) (+ 4 len))
-        (let* ((payload (substring eaf-eafvil--read-buf 4 (+ 4 len)))
+        (let* ((payload (decode-coding-string
+                         (substring eaf-eafvil--read-buf 4 (+ 4 len)) 'utf-8))
                (obj (json-parse-string payload)))
-          (setq eaf-eafvil--read-buf (substring eaf-eafvil--read-buf (+ 4 len)))
+          (setq eaf-eafvil--read-buf
+                (substring eaf-eafvil--read-buf (+ 4 len)))
           obj)))))
 
 ;; ---------------------------------------------------------------------------
@@ -75,7 +87,8 @@ Returns the parsed JSON object (as a hash-table) or nil if not enough data."
 (defun eaf-eafvil--filter (proc data)
   "Accumulate DATA from PROC and dispatch complete messages."
   (ignore proc)
-  (setq eaf-eafvil--read-buf (concat eaf-eafvil--read-buf data))
+  (setq eaf-eafvil--read-buf
+        (concat eaf-eafvil--read-buf (string-as-unibyte data)))
   (let (msg)
     (while (setq msg (eaf-eafvil--decode-next))
       (eaf-eafvil--dispatch msg))))
@@ -106,18 +119,48 @@ Returns the parsed JSON object (as a hash-table) or nil if not enough data."
      ((string= type "title_changed")
       (eaf-eafvil--on-title-changed (gethash "window_id" msg)
                                  (gethash "title" msg "")))
+     ((string= type "surface_size")
+      (let* ((h (gethash "height" msg))
+             (offset (max 0 (- h (frame-pixel-height)))))
+        (setq eaf-eafvil--header-offset offset)
+        (message "eafvil: surface=%sx%s bars=%dpx"
+                 (gethash "width" msg) h offset)
+        ;; Re-sync all EAF windows now that we have the correct offset.
+        (dolist (frame (frame-list))
+          (eaf-eafvil--sync-all-geometries frame))))
      (t
       (message "eafvil: unknown message type %s" type)))))
 
-;; Placeholders — will be replaced in M2.
 (defun eaf-eafvil--on-window-created (window-id title)
-  (message "eafvil: window_created id=%s title=%s" window-id title))
+  "Create/display a buffer for the new EAF app and send initial geometry."
+  (let* ((buf-name (format "*eaf: %s*" (if (string-empty-p title) "app" title)))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (setq-local eaf-eafvil--window-id window-id)
+      (setq-local mode-name "EAF")
+      (setq-local buffer-read-only t))
+    (switch-to-buffer buf)
+    (when-let ((win (get-buffer-window buf t)))
+      (eaf-eafvil--report-geometry window-id win))
+    (message "eafvil: EAF app ready (id=%s)" window-id)))
+
+(defun eaf-eafvil--find-buffer (window-id)
+  "Return the buffer whose `eaf-eafvil--window-id' equals WINDOW-ID, or nil."
+  (seq-find (lambda (buf)
+              (equal (buffer-local-value 'eaf-eafvil--window-id buf) window-id))
+            (buffer-list)))
 
 (defun eaf-eafvil--on-window-destroyed (window-id)
-  (message "eafvil: window_destroyed id=%s" window-id))
+  "Kill the EAF buffer associated with WINDOW-ID."
+  (when-let ((buf (eaf-eafvil--find-buffer window-id)))
+    (kill-buffer buf)
+    (message "eafvil: window %s destroyed" window-id)))
 
 (defun eaf-eafvil--on-title-changed (window-id title)
-  (message "eafvil: title_changed id=%s title=%s" window-id title))
+  "Rename the EAF buffer when the app title changes."
+  (when-let ((buf (eaf-eafvil--find-buffer window-id)))
+    (with-current-buffer buf
+      (rename-buffer (format "*eaf: %s*" title) t))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
@@ -155,24 +198,104 @@ Returns the parsed JSON object (as a hash-table) or nil if not enough data."
 ;; Geometry reporting
 ;; ---------------------------------------------------------------------------
 
+(defun eaf-eafvil--frame-header-offset (&optional _frame)
+  "Pixel height of external GTK bars (menu-bar + tool-bar).
+Computed once when the compositor reports the surface size."
+  (or eaf-eafvil--header-offset 0))
+
 (defun eaf-eafvil--window-geometry (window)
-  "Return (x y w h) in pixels for Emacs WINDOW."
+  "Return (x y w h) in pixels for Emacs WINDOW.
+Coordinates are relative to the top-left of the Wayland surface.
+Covers the full window width (including fringes) but excludes the mode-line."
   (let* ((edges (window-pixel-edges window))
+         (body-edges (window-body-pixel-edges window))
          (x (nth 0 edges))
-         (y (nth 1 edges))
+         (raw-y (nth 1 edges))
+         (y (+ raw-y (eaf-eafvil--frame-header-offset (window-frame window))))
          (w (- (nth 2 edges) x))
-         (h (- (nth 3 edges) y)))
+         ;; body-bottom = top of mode-line; stop there so mode-line stays visible.
+         (h (- (nth 3 body-edges) raw-y)))
     (list x y w h)))
 
+(defun eaf-eafvil-debug-geometry ()
+  "Print geometry debug info to *Messages*."
+  (interactive)
+  (let* ((frame (selected-frame))
+         (geom (frame-geometry frame))
+         (win (selected-window))
+         (root-edges (window-pixel-edges (frame-root-window frame)))
+         (mb-h (or (cdr (alist-get 'menu-bar-size geom)) 0))
+         (tb-h (or (cdr (alist-get 'tool-bar-size geom)) 0))
+         (mb-ext (alist-get 'menu-bar-external geom))
+         (tb-ext (alist-get 'tool-bar-external geom))
+         (outer-h (cdr (alist-get 'outer-size geom)))
+         (pixel-h (frame-pixel-height frame))
+         (inner-h (frame-inner-height frame))
+         (mb-lines (frame-parameter frame 'menu-bar-lines))
+         (offset (eaf-eafvil--frame-header-offset frame))
+         (final (eaf-eafvil--window-geometry win)))
+    (message (concat "eafvil-debug: "
+                     "mb: h=%d ext=%s lines=%s | "
+                     "tb: h=%d ext=%s | "
+                     "outer-h=%s pixel-h=%d inner-h=%d | "
+                     "root-edges: %s | "
+                     "offset: %d | final: %s")
+             mb-h mb-ext mb-lines
+             tb-h tb-ext
+             outer-h pixel-h inner-h
+             root-edges offset final)))
+
+(defvar-local eaf-eafvil--last-geometry nil
+  "Last geometry sent for this buffer's EAF window, to skip no-op updates.")
+
 (defun eaf-eafvil--report-geometry (window-id window)
-  "Send set_geometry for WINDOW-ID based on WINDOW's current pixel geometry."
+  "Send set_geometry for WINDOW-ID, only when geometry actually changed."
   (let ((geo (eaf-eafvil--window-geometry window)))
-    (eaf-eafvil--send `((type . "set_geometry")
-                    (window_id . ,window-id)
-                    (x . ,(nth 0 geo))
-                    (y . ,(nth 1 geo))
-                    (w . ,(nth 2 geo))
-                    (h . ,(nth 3 geo))))))
+    (unless (equal geo (buffer-local-value 'eaf-eafvil--last-geometry
+                                           (window-buffer window)))
+      (with-current-buffer (window-buffer window)
+        (setq-local eaf-eafvil--last-geometry geo))
+      (eaf-eafvil--send `((type . "set_geometry")
+                      (window_id . ,window-id)
+                      (x . ,(nth 0 geo))
+                      (y . ,(nth 1 geo))
+                      (w . ,(nth 2 geo))
+                      (h . ,(nth 3 geo)))))))
+
+(defun eaf-eafvil--sync-all-geometries (frame)
+  "Sync geometry for every EAF buffer visible in FRAME."
+  (dolist (win (window-list frame nil nil))
+    (let ((window-id (buffer-local-value 'eaf-eafvil--window-id (window-buffer win))))
+      (when window-id
+        (eaf-eafvil--report-geometry window-id win)))))
+
+(add-hook 'window-size-change-functions #'eaf-eafvil--sync-all-geometries)
+
+;; ---------------------------------------------------------------------------
+;; Launch an EAF application
+;; ---------------------------------------------------------------------------
+
+(defcustom eaf-eafvil-demo-dir
+  (expand-file-name
+   "../demo"
+   (file-name-directory
+    (or load-file-name buffer-file-name
+        "~/.emacs.d/site-lisp/emacs-application-framework/mvp/elisp/")))
+  "Directory containing EAF demo/app Python scripts."
+  :type 'directory
+  :group 'eaf-eafvil)
+
+(defun eaf-open-app (app-name)
+  "Launch EAF application APP-NAME (Python script in `eaf-eafvil-demo-dir')."
+  (interactive "sApp name: ")
+  (let* ((script (expand-file-name (format "%s.py" app-name) eaf-eafvil-demo-dir))
+         (process-environment
+          (cons (format "WAYLAND_DISPLAY=%s" (or (getenv "WAYLAND_DISPLAY") ""))
+                process-environment)))
+    (unless (file-exists-p script)
+      (error "EAF script not found: %s" script))
+    (start-process (format "eaf-%s" app-name) nil "python3" script)
+    (message "eafvil: launched %s" app-name)))
 
 ;; ---------------------------------------------------------------------------
 ;; Auto-connect when running inside eafvil

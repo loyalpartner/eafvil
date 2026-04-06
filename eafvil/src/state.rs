@@ -30,6 +30,7 @@ pub struct EafvilState {
     pub display_handle: DisplayHandle,
 
     pub ipc: crate::ipc::IpcServer,
+    pub apps: crate::apps::AppManager,
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
@@ -79,7 +80,7 @@ impl EafvilState {
         event_loop: &mut EventLoop<Self>,
         display: Display<Self>,
         ipc: crate::ipc::IpcServer,
-    ) -> Self {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let start_time = std::time::Instant::now();
         let dh = display.handle();
 
@@ -99,7 +100,7 @@ impl EafvilState {
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
 
         seat.add_keyboard(Default::default(), 200, 25)
-            .expect("failed to initialize keyboard");
+            .map_err(|e| format!("failed to initialize keyboard: {e:?}"))?;
         seat.add_pointer();
 
         let space = Space::default();
@@ -108,11 +109,12 @@ impl EafvilState {
 
         let loop_signal = event_loop.get_signal();
 
-        Self {
+        Ok(Self {
             start_time,
             display_handle: dh,
 
             ipc,
+            apps: crate::apps::AppManager::default(),
 
             space,
             loop_signal,
@@ -138,7 +140,7 @@ impl EafvilState {
             pending_maximize: None,
             emacs_title: None,
             emacs_app_id: None,
-        }
+        })
     }
 
     fn init_wayland_listener(

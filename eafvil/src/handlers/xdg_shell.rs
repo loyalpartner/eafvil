@@ -25,31 +25,56 @@ impl XdgShellHandler for EafvilState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        if self.emacs_surface.is_some() {
-            tracing::warn!("Rejecting additional toplevel (single frame constraint)");
-            surface.send_close();
-            return;
-        }
+        if self.emacs_surface.is_none() {
+            // First toplevel = Emacs.
+            tracing::info!("Emacs toplevel connected");
+            self.emacs_surface = Some(surface.wl_surface().clone());
 
-        tracing::info!("Emacs toplevel connected");
-        self.emacs_surface = Some(surface.wl_surface().clone());
-
-        // Configure Emacs to fill the host window.
-        // Logical size = physical / integer_scale so Emacs renders at the correct DPI.
-        if let Some(output) = self.space.outputs().next() {
-            if let Some(mode) = output.current_mode() {
-                let scale = output.current_scale().fractional_scale();
-                let logical = mode.size.to_f64().to_logical(scale).to_i32_round();
-                surface.with_pending_state(|state| {
-                    state.size = Some(logical);
-                    state.states.set(xdg_toplevel::State::Fullscreen);
-                });
+            if let Some(output) = self.space.outputs().next() {
+                if let Some(mode) = output.current_mode() {
+                    let scale = output.current_scale().fractional_scale();
+                    let logical = mode.size.to_f64().to_logical(scale).to_i32_round();
+                    surface.with_pending_state(|state| {
+                        state.size = Some(logical);
+                        state.states.set(xdg_toplevel::State::Fullscreen);
+                    });
+                    self.ipc.send(crate::ipc::OutgoingMessage::SurfaceSize {
+                        width: logical.w,
+                        height: logical.h,
+                    });
+                }
             }
-        }
-        self.initial_size_settled = true;
+            self.initial_size_settled = true;
 
-        let window = Window::new_wayland_window(surface);
-        self.space.map_element(window, (0, 0), false);
+            let window = Window::new_wayland_window(surface);
+            self.space.map_element(window, (0, 0), false);
+        } else {
+            // Subsequent toplevels = EAF app windows.
+            let window_id = self.apps.alloc_id();
+            let title =
+                Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.title.clone()))
+                    .unwrap_or_default();
+
+            tracing::info!("EAF app toplevel connected: window_id={window_id} title={title:?}");
+
+            // Start at 1×1; actual size arrives via set_geometry IPC.
+            surface.with_pending_state(|s| {
+                s.size = Some((1, 1).into());
+            });
+
+            let window = Window::new_wayland_window(surface);
+            // Map at 1×1 so on_commit() and initial configure work.
+            self.space.map_element(window.clone(), (0, 0), false);
+            self.apps.insert(crate::apps::AppWindow {
+                window_id,
+                window,
+                geometry: None,
+                visible: false,
+            });
+
+            self.ipc
+                .send(crate::ipc::OutgoingMessage::WindowCreated { window_id, title });
+        }
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -117,12 +142,17 @@ impl XdgShellHandler for EafvilState {
     }
 
     fn title_changed(&mut self, surface: ToplevelSurface) {
+        let title =
+            Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.title.clone()));
         if self.is_emacs_surface(&surface) {
-            let title =
-                Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.title.clone()));
             if let Some(title) = title {
-                tracing::debug!("Emacs title changed: {}", title);
+                tracing::debug!("Emacs title changed: {title}");
                 self.emacs_title = Some(title);
+            }
+        } else if let Some(window_id) = self.apps.id_for_surface(surface.wl_surface()) {
+            if let Some(title) = title {
+                self.ipc
+                    .send(crate::ipc::OutgoingMessage::TitleChanged { window_id, title });
             }
         }
     }
@@ -204,7 +234,9 @@ pub fn handle_surface_commit(
         match popup {
             PopupKind::Xdg(ref xdg) => {
                 if !xdg.is_initial_configure_sent() {
-                    xdg.send_configure().expect("initial configure failed");
+                    if let Err(e) = xdg.send_configure() {
+                        tracing::warn!("initial popup configure failed: {e}");
+                    }
                 }
             }
             PopupKind::InputMethod(ref _input_method) => {}

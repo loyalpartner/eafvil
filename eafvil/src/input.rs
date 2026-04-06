@@ -15,12 +15,14 @@ use crate::state::EafvilState;
 impl EafvilState {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         match event {
-            // Keyboard: always forward to Emacs (the only client with keyboard focus)
             InputEvent::Keyboard { event, .. } => {
+                let Some(keyboard) = self.seat.get_keyboard() else {
+                    return;
+                };
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
 
-                self.seat.get_keyboard().unwrap().input::<(), _>(
+                keyboard.input::<(), _>(
                     self,
                     event.key_code(),
                     event.state(),
@@ -32,7 +34,6 @@ impl EafvilState {
 
             InputEvent::PointerMotion { .. } => {}
 
-            // Pointer motion: forward to Emacs surface
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(output) = self.space.outputs().next() else {
                     return;
@@ -40,10 +41,12 @@ impl EafvilState {
                 let Some(output_geo) = self.space.output_geometry(output) else {
                     return;
                 };
+                let Some(pointer) = self.seat.get_pointer() else {
+                    return;
+                };
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
 
                 let serial = SERIAL_COUNTER.next_serial();
-                let pointer = self.seat.get_pointer().unwrap();
                 let under = self.surface_under(pos);
 
                 pointer.motion(
@@ -58,27 +61,22 @@ impl EafvilState {
                 pointer.frame(self);
             }
 
-            // Pointer button: simplified for M0 (only Emacs surface)
             InputEvent::PointerButton { event, .. } => {
-                let pointer = self.seat.get_pointer().unwrap();
-                let keyboard = self.seat.get_keyboard().unwrap();
+                let Some(pointer) = self.seat.get_pointer() else {
+                    return;
+                };
+                let Some(keyboard) = self.seat.get_keyboard() else {
+                    return;
+                };
 
                 let serial = SERIAL_COUNTER.next_serial();
                 let button = event.button_code();
                 let button_state = event.state();
 
-                // Ensure keyboard focus stays on Emacs
+                // Clone to release shared borrow on self before set_focus(&mut self).
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
-                    if let Some((window, _loc)) = self
-                        .space
-                        .element_under(pointer.current_location())
-                        .map(|(w, l)| (w.clone(), l))
-                    {
-                        keyboard.set_focus(
-                            self,
-                            Some(window.toplevel().unwrap().wl_surface().clone()),
-                            serial,
-                        );
+                    if let Some(emacs_surface) = self.emacs_surface.clone() {
+                        keyboard.set_focus(self, Some(emacs_surface), serial);
                     }
                 }
 
@@ -94,8 +92,10 @@ impl EafvilState {
                 pointer.frame(self);
             }
 
-            // Pointer axis (scroll): forward as-is
             InputEvent::PointerAxis { event, .. } => {
+                let Some(pointer) = self.seat.get_pointer() else {
+                    return;
+                };
                 let source = event.source();
 
                 let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
@@ -130,7 +130,6 @@ impl EafvilState {
                     }
                 }
 
-                let pointer = self.seat.get_pointer().unwrap();
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }

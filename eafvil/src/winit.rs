@@ -10,7 +10,7 @@ use smithay::{
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::calloop::EventLoop,
-    utils::{Physical, Rectangle, Size, Transform},
+    utils::{Logical, Physical, Rectangle, Size, Transform},
 };
 
 use crate::EafvilState;
@@ -59,9 +59,13 @@ fn render_frame(
     let damage = Rectangle::from_size(size);
 
     {
-        let (renderer, mut framebuffer) = backend.bind().expect("failed to bind rendering backend");
+        let Ok((renderer, mut framebuffer)) = backend.bind() else {
+            tracing::error!("Failed to bind rendering backend, skipping frame");
+            return;
+        };
+
         let render_scale = 1.0;
-        smithay::desktop::space::render_output::<
+        if let Err(e) = smithay::desktop::space::render_output::<
             _,
             WaylandSurfaceRenderElement<GlesRenderer>,
             _,
@@ -76,12 +80,15 @@ fn render_frame(
             &[],
             damage_tracker,
             [1.0, 1.0, 1.0, 1.0],
-        )
-        .expect("render_output failed");
+        ) {
+            tracing::error!("render_output failed: {e}");
+            return;
+        }
     }
-    backend
-        .submit(Some(&[damage]))
-        .expect("frame submit failed");
+
+    if let Err(e) = backend.submit(Some(&[damage])) {
+        tracing::error!("frame submit failed: {e}");
+    }
 }
 
 fn post_render(state: &mut EafvilState, output: &Output) {
@@ -98,6 +105,26 @@ fn post_render(state: &mut EafvilState, output: &Output) {
     state.popups.cleanup();
     if let Err(e) = state.display_handle.flush_clients() {
         tracing::warn!("flush_clients failed: {}", e);
+    }
+}
+
+/// Resize only the Emacs toplevel; EAF app sizes come from Emacs via IPC.
+fn resize_emacs_surface(state: &mut EafvilState, logical: Size<i32, Logical>) {
+    let Some(ref emacs_surface) = state.emacs_surface else {
+        return;
+    };
+    for window in state.space.elements() {
+        let Some(toplevel) = window.toplevel() else {
+            continue;
+        };
+        if toplevel.wl_surface() != emacs_surface {
+            continue;
+        }
+        toplevel.with_pending_state(|s| {
+            s.size = Some(logical);
+        });
+        toplevel.send_pending_configure();
+        return;
     }
 }
 
@@ -157,14 +184,7 @@ pub fn init_winit(
 
                     if state.initial_size_settled {
                         let logical = size.to_f64().to_logical(scale_factor).to_i32_round();
-                        for window in state.space.elements() {
-                            if let Some(toplevel) = window.toplevel() {
-                                toplevel.with_pending_state(|s| {
-                                    s.size = Some(logical);
-                                });
-                                toplevel.send_pending_configure();
-                            }
-                        }
+                        resize_emacs_surface(state, logical);
                     }
                 }
 
