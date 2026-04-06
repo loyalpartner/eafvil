@@ -1,0 +1,20 @@
+[package]
+name = "eafvil"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+bitflags = "2.2.1"
+winit_crate = { package = "winit", version = "0.30", default-features = false }
+
+[dependencies.smithay]
+git = "https://github.com/Smithay/smithay.git"
+rev = "d28cf3808"
+default-features = false
+features = [
+    "backend_winit",
+    "wayland_frontend",
+    "desktop",
+]
