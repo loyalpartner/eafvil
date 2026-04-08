@@ -428,6 +428,16 @@ Covers the full window width (including fringes) but excludes the mode-line."
     (start-process (format "eaf-%s" app-name) nil "python3" script)
     (message "eafvil: launched %s" app-name)))
 
+(defun eaf-open-native-app (command)
+  "Launch a native Wayland application inside eafvil.
+COMMAND is a shell command string, e.g. \"foot\" or \"firefox\"."
+  (interactive "sCommand: ")
+  (let ((args (split-string-and-unquote command)))
+    (apply #'start-process
+           (format "eafvil-%s" (car args))
+           nil args)
+    (message "eafvil: launched native app: %s" command)))
+
 ;; ---------------------------------------------------------------------------
 ;; Auto-connect when running inside eafvil
 ;; ---------------------------------------------------------------------------
