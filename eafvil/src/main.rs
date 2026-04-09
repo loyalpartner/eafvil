@@ -1,5 +1,6 @@
 pub mod apps;
 mod clipboard;
+mod clipboard_x11;
 mod handlers;
 mod input;
 pub mod ipc;
@@ -77,8 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ipc = crate::ipc::IpcServer::bind(ipc_path)?;
     let mut state = EafvilState::new(&mut event_loop, display, ipc, xkb_config)?;
 
-    // Initialize clipboard synchronization with host compositor
-    state.clipboard = clipboard::ClipboardProxy::new();
+    // Initialize clipboard synchronization with host compositor.
+    // Try Wayland data_control first; fall back to X11 selection protocol.
+    state.clipboard = clipboard::ClipboardProxy::new()
+        .map(clipboard::HostClipboard::Wayland)
+        .or_else(|| clipboard_x11::X11ClipboardProxy::new().map(clipboard::HostClipboard::X11));
     if let Some(ref clipboard) = state.clipboard {
         register_clipboard_source(&mut event_loop, clipboard)?;
     }
@@ -538,7 +542,7 @@ fn start_xwayland(
 
 fn register_clipboard_source(
     event_loop: &mut smithay::reexports::calloop::EventLoop<EafvilState>,
-    clipboard: &clipboard::ClipboardProxy,
+    clipboard: &clipboard::HostClipboard,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
     use std::os::unix::io::{AsRawFd, FromRawFd};

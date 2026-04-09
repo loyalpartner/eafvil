@@ -89,7 +89,7 @@ impl SelectionHandler for EafvilState {
     ) {
         // Internal client wants to paste our compositor-injected (host) selection.
         // Forward the fd directly to the host so the host source writes into it.
-        if let Some(ref clipboard) = self.clipboard {
+        if let Some(ref mut clipboard) = self.clipboard {
             tracing::debug!("Forwarding host selection to internal client ({ty:?}, {mime_type})");
             clipboard.receive_from_host(ty, &mime_type, fd);
         }

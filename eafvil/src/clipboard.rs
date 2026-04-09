@@ -28,9 +28,66 @@ use wayland_protocols_wlr::data_control::v1::client::{
 
 use smithay::wayland::selection::SelectionTarget;
 
+use crate::clipboard_x11::X11ClipboardProxy;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// Unified host clipboard backend (Wayland or X11).
+pub enum HostClipboard {
+    Wayland(ClipboardProxy),
+    X11(X11ClipboardProxy),
+}
+
+impl HostClipboard {
+    pub fn dispatch(&mut self) {
+        match self {
+            Self::Wayland(p) => p.dispatch(),
+            Self::X11(p) => p.dispatch(),
+        }
+    }
+
+    pub fn take_events(&mut self) -> Vec<ClipboardEvent> {
+        match self {
+            Self::Wayland(p) => p.take_events(),
+            Self::X11(p) => p.take_events(),
+        }
+    }
+
+    pub fn connection_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        match self {
+            Self::Wayland(p) => p.connection_fd(),
+            Self::X11(p) => p.connection_fd(),
+        }
+    }
+
+    pub fn receive_from_host(
+        &mut self,
+        target: SelectionTarget,
+        mime_type: &str,
+        fd: std::os::fd::OwnedFd,
+    ) {
+        match self {
+            Self::Wayland(p) => p.receive_from_host(target, mime_type, fd),
+            Self::X11(p) => p.receive_from_host(target, mime_type, fd),
+        }
+    }
+
+    pub fn set_host_selection(&mut self, target: SelectionTarget, mime_types: &[String]) {
+        match self {
+            Self::Wayland(p) => p.set_host_selection(target, mime_types),
+            Self::X11(p) => p.set_host_selection(target, mime_types),
+        }
+    }
+
+    pub fn clear_host_selection(&mut self, target: SelectionTarget) {
+        match self {
+            Self::Wayland(p) => p.clear_host_selection(target),
+            Self::X11(p) => p.clear_host_selection(target),
+        }
+    }
+}
 
 /// Events from host clipboard that need processing by the compositor.
 pub enum ClipboardEvent {

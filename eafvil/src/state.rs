@@ -87,8 +87,8 @@ pub struct EafvilState {
     /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
     pub pending_command: Option<(String, Vec<String>)>,
 
-    /// Clipboard synchronization proxy (None if host doesn't support data_control)
-    pub clipboard: Option<crate::clipboard::ClipboardProxy>,
+    /// Clipboard synchronization proxy (Wayland or X11 backend, None if unavailable)
+    pub clipboard: Option<crate::clipboard::HostClipboard>,
 }
 
 impl EafvilState {
