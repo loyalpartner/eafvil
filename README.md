@@ -4,6 +4,8 @@
 
 eafvil 在一个 winit 窗口内运行独立的 Wayland 合成器，Emacs 作为主窗口全屏运行，EAF 应用作为子窗口叠加在指定区域。
 
+![demo](screenshots/demo.gif)
+
 ## 特性
 
 - Emacs 全屏嵌入，EAF 应用窗口由 Emacs 通过 IPC 控制位置和大小
