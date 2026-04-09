@@ -121,6 +121,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_clipboard_event(state, event);
         }
 
+        // Evict activation tokens older than 30s to prevent unbounded growth.
+        state
+            .xdg_activation_state
+            .retain_tokens(|_, data| data.timestamp.elapsed().as_secs() < 30);
+
         // Force-commit pending geometries that have timed out (100ms).
         for (window_id, window, geo) in state
             .apps
@@ -250,6 +255,9 @@ fn handle_ipc_message(state: &mut EafvilState, msg: ipc::IncomingMessage) {
         }
         IncomingMessage::PromoteMirror { window_id, view_id } => {
             ipc_promote_mirror(state, window_id, view_id);
+        }
+        IncomingMessage::RequestActivationToken => {
+            ipc_request_activation_token(state);
         }
     }
 }
@@ -426,6 +434,15 @@ fn ipc_remove_mirror(state: &mut EafvilState, window_id: u64, view_id: u64) {
     if let Some(app) = state.apps.get_mut(window_id) {
         app.mirrors.remove(&view_id);
     }
+}
+
+fn ipc_request_activation_token(state: &mut EafvilState) {
+    let (token, _data) = state.xdg_activation_state.create_external_token(None);
+    let token_str = token.to_string();
+    tracing::debug!("IPC request_activation_token: {token_str}");
+    state
+        .ipc
+        .send(ipc::OutgoingMessage::ActivationToken { token: token_str });
 }
 
 fn ipc_promote_mirror(state: &mut EafvilState, window_id: u64, view_id: u64) {

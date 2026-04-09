@@ -21,6 +21,7 @@ use smithay::{
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
+        xdg_activation::XdgActivationState,
     },
 };
 
@@ -46,6 +47,7 @@ pub struct EafvilState {
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub viewporter_state: ViewporterState,
     pub xdg_decoration_state: XdgDecorationState,
+    pub xdg_activation_state: XdgActivationState,
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
@@ -98,6 +100,7 @@ impl EafvilState {
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
+        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
 
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
@@ -136,6 +139,7 @@ impl EafvilState {
             fractional_scale_manager_state,
             viewporter_state,
             xdg_decoration_state,
+            xdg_activation_state,
             popups,
             seat,
 

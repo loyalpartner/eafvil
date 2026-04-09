@@ -49,6 +49,9 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 (defvar eaf-eafvil--next-view-id 0
   "Counter for generating unique mirror view IDs.")
 
+(defvar eaf-eafvil--pending-activations nil
+  "Queue of callbacks awaiting activation tokens (FIFO).")
+
 ;; ---------------------------------------------------------------------------
 ;; Socket discovery
 ;; ---------------------------------------------------------------------------
@@ -138,6 +141,10 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
      ((string= type "focus_view")
       (eaf-eafvil--on-focus-view (gethash "window_id" msg)
                                  (gethash "view_id" msg)))
+     ((string= type "activation_token")
+      (when eaf-eafvil--pending-activations
+        (let ((cb (pop eaf-eafvil--pending-activations)))
+          (funcall cb (gethash "token" msg "")))))
      ((string= type "surface_size")
       (let* ((h (gethash "height" msg))
              (offset (max 0 (- h (frame-pixel-height)))))
@@ -506,27 +513,46 @@ Covers the full window width (including fringes) but excludes the mode-line."
   :type 'directory
   :group 'eaf-eafvil)
 
+(defun eaf-eafvil--process-env-with-token (token)
+  "Build process-environment with XDG_ACTIVATION_TOKEN and WAYLAND_DISPLAY."
+  (append
+   (when token (list (format "XDG_ACTIVATION_TOKEN=%s" token)))
+   (list (format "WAYLAND_DISPLAY=%s" (or (getenv "WAYLAND_DISPLAY") "")))
+   process-environment))
+
+(defun eaf-eafvil--launch-with-token (callback)
+  "Request an activation token, then call CALLBACK with the token string.
+CALLBACK receives the token string (or nil if unavailable)."
+  (if (not eaf-eafvil--process)
+      (funcall callback nil)
+    (setq eaf-eafvil--pending-activations
+          (append eaf-eafvil--pending-activations (list callback)))
+    (eaf-eafvil--send '((type . "request_activation_token")))))
+
 (defun eaf-open-app (app-name)
   "Launch EAF application APP-NAME (Python script in `eaf-eafvil-demo-dir')."
   (interactive "sApp name: ")
-  (let* ((script (expand-file-name (format "%s.py" app-name) eaf-eafvil-demo-dir))
-         (process-environment
-          (cons (format "WAYLAND_DISPLAY=%s" (or (getenv "WAYLAND_DISPLAY") ""))
-                process-environment)))
+  (let ((script (expand-file-name (format "%s.py" app-name) eaf-eafvil-demo-dir)))
     (unless (file-exists-p script)
       (error "EAF script not found: %s" script))
-    (start-process (format "eaf-%s" app-name) nil "python3" script)
-    (message "eafvil: launched %s" app-name)))
+    (eaf-eafvil--launch-with-token
+     (lambda (token)
+       (let ((process-environment (eaf-eafvil--process-env-with-token token)))
+         (start-process (format "eaf-%s" app-name) nil "python3" script)
+         (message "eafvil: launched %s" app-name))))))
 
 (defun eaf-open-native-app (command)
   "Launch a native Wayland application inside eafvil.
 COMMAND is a shell command string, e.g. \"foot\" or \"firefox\"."
   (interactive "sCommand: ")
   (let ((args (split-string-and-unquote command)))
-    (apply #'start-process
-           (format "eafvil-%s" (car args))
-           nil args)
-    (message "eafvil: launched native app: %s" command)))
+    (eaf-eafvil--launch-with-token
+     (lambda (token)
+       (let ((process-environment (eaf-eafvil--process-env-with-token token)))
+         (apply #'start-process
+                (format "eafvil-%s" (car args))
+                nil args)
+         (message "eafvil: launched native app: %s" command))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Auto-connect when running inside eafvil
