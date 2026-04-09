@@ -1,4 +1,5 @@
 pub mod apps;
+mod clipboard;
 mod grabs;
 mod handlers;
 mod input;
@@ -56,6 +57,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => tracing::info!("Could not read host keymap, using default"),
     }
 
+    // Initialize clipboard synchronization with host compositor
+    state.clipboard = clipboard::ClipboardProxy::new();
+    if let Some(ref clipboard) = state.clipboard {
+        register_clipboard_source(&mut event_loop, clipboard)?;
+    }
+
     register_ipc_source(&mut event_loop, &state)?;
 
     // Open a Wayland/X11 window for our nested compositor
@@ -85,6 +92,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for msg in msgs {
                 handle_ipc_message(state, msg);
             }
+        }
+
+        // Process clipboard events from host compositor.
+        let clipboard_events = state
+            .clipboard
+            .as_mut()
+            .map(|c| c.take_events())
+            .unwrap_or_default();
+        for event in clipboard_events {
+            handle_clipboard_event(state, event);
         }
 
         // Force-commit pending geometries that have timed out (100ms).
@@ -405,6 +422,113 @@ fn ipc_promote_mirror(state: &mut EafvilState, window_id: u64, view_id: u64) {
         app.geometry = Some(mv.geometry);
         let window = app.window.clone();
         state.space.map_element(window, mv.geometry.loc, false);
+    }
+}
+
+fn register_clipboard_source(
+    event_loop: &mut smithay::reexports::calloop::EventLoop<EafvilState>,
+    clipboard: &clipboard::ClipboardProxy,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let raw_fd = clipboard.connection_fd().as_raw_fd();
+    // SAFETY: dup() returns a valid fd that we transfer ownership to File.
+    let dup_fd = unsafe { libc::dup(raw_fd) };
+    if dup_fd < 0 {
+        return Err("dup(clipboard connection fd) failed".into());
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+
+    event_loop
+        .handle()
+        .insert_source(
+            Generic::new(file, Interest::READ, Mode::Level),
+            |_, _, state| {
+                if let Some(ref mut clipboard) = state.clipboard {
+                    clipboard.dispatch();
+                }
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| format!("failed to register clipboard source: {e}"))?;
+    Ok(())
+}
+
+fn handle_clipboard_event(state: &mut EafvilState, event: clipboard::ClipboardEvent) {
+    use clipboard::ClipboardEvent;
+
+    match event {
+        ClipboardEvent::HostSelectionChanged { target, mime_types } => {
+            inject_host_selection(state, target, mime_types);
+        }
+        ClipboardEvent::HostSendRequest {
+            target,
+            mime_type,
+            fd,
+        } => {
+            forward_client_selection(state, target, mime_type, fd);
+        }
+        ClipboardEvent::SourceCancelled { target } => {
+            tracing::debug!("Host source cancelled ({target:?})");
+        }
+    }
+}
+
+fn inject_host_selection(
+    state: &mut EafvilState,
+    target: smithay::wayland::selection::SelectionTarget,
+    mime_types: Vec<String>,
+) {
+    use smithay::wayland::selection::data_device::{
+        clear_data_device_selection, set_data_device_selection,
+    };
+    use smithay::wayland::selection::primary_selection::{
+        clear_primary_selection, set_primary_selection,
+    };
+    use smithay::wayland::selection::SelectionTarget;
+
+    if mime_types.is_empty() {
+        tracing::debug!("Host {target:?} cleared");
+        match target {
+            SelectionTarget::Clipboard => {
+                clear_data_device_selection(&state.display_handle, &state.seat)
+            }
+            SelectionTarget::Primary => clear_primary_selection(&state.display_handle, &state.seat),
+        }
+    } else {
+        tracing::debug!("Host {target:?} changed ({} types)", mime_types.len());
+        match target {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&state.display_handle, &state.seat, mime_types, ())
+            }
+            SelectionTarget::Primary => {
+                set_primary_selection(&state.display_handle, &state.seat, mime_types, ())
+            }
+        }
+    }
+}
+
+fn forward_client_selection(
+    state: &mut EafvilState,
+    target: smithay::wayland::selection::SelectionTarget,
+    mime_type: String,
+    fd: std::os::fd::OwnedFd,
+) {
+    use smithay::wayland::selection::data_device::request_data_device_client_selection;
+    use smithay::wayland::selection::primary_selection::request_primary_client_selection;
+    use smithay::wayland::selection::SelectionTarget;
+
+    let result = match target {
+        SelectionTarget::Clipboard => {
+            request_data_device_client_selection(&state.seat, mime_type, fd)
+                .map_err(|e| format!("{e:?}"))
+        }
+        SelectionTarget::Primary => request_primary_client_selection(&state.seat, mime_type, fd)
+            .map_err(|e| format!("{e:?}")),
+    };
+    if let Err(e) = result {
+        tracing::warn!("Failed to forward {target:?} selection to host: {e}");
     }
 }
 

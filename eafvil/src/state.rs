@@ -16,7 +16,7 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
-        selection::data_device::DataDeviceState,
+        selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
         shell::xdg::{decoration::XdgDecorationState, XdgShellState},
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -42,6 +42,7 @@ pub struct EafvilState {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<EafvilState>,
     pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub viewporter_state: ViewporterState,
     pub xdg_decoration_state: XdgDecorationState,
@@ -73,6 +74,9 @@ pub struct EafvilState {
 
     /// Emacs app_id, forwarded to host toplevel
     pub emacs_app_id: Option<String>,
+
+    /// Clipboard synchronization proxy (None if host doesn't support data_control)
+    pub clipboard: Option<crate::clipboard::ClipboardProxy>,
 }
 
 impl EafvilState {
@@ -95,6 +99,7 @@ impl EafvilState {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
 
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
@@ -126,6 +131,7 @@ impl EafvilState {
             output_manager_state,
             seat_state,
             data_device_state,
+            primary_selection_state,
             fractional_scale_manager_state,
             viewporter_state,
             xdg_decoration_state,
@@ -140,6 +146,7 @@ impl EafvilState {
             pending_maximize: None,
             emacs_title: None,
             emacs_app_id: None,
+            clipboard: None,
         })
     }
 

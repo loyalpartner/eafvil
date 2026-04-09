@@ -7,6 +7,8 @@ use crate::EafvilState;
 // Wl Seat
 //
 
+use std::os::fd::OwnedFd;
+
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
 use smithay::input::pointer::Focus;
 use smithay::input::{Seat, SeatHandler, SeatState};
@@ -17,8 +19,11 @@ use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
-use smithay::wayland::selection::SelectionHandler;
-use smithay::{delegate_data_device, delegate_output, delegate_seat};
+use smithay::wayland::selection::primary_selection::{
+    set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
+};
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
+use smithay::{delegate_data_device, delegate_output, delegate_primary_selection, delegate_seat};
 
 impl SeatHandler for EafvilState {
     type KeyboardFocus = WlSurface;
@@ -39,7 +44,8 @@ impl SeatHandler for EafvilState {
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
-        set_data_device_focus(dh, seat, client);
+        set_data_device_focus(dh, seat, client.clone());
+        set_primary_focus(dh, seat, client);
     }
 }
 
@@ -51,6 +57,41 @@ delegate_seat!(EafvilState);
 
 impl SelectionHandler for EafvilState {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let Some(ref mut clipboard) = self.clipboard else {
+            return;
+        };
+        if let Some(source) = source {
+            let mime_types = source.mime_types();
+            tracing::debug!("Internal selection set ({ty:?}): {mime_types:?}");
+            clipboard.set_host_selection(ty, &mime_types);
+        } else {
+            tracing::debug!("Internal selection cleared ({ty:?})");
+            clipboard.clear_host_selection(ty);
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        // Internal client wants to paste our compositor-injected (host) selection.
+        // Forward the fd directly to the host so the host source writes into it.
+        if let Some(ref clipboard) = self.clipboard {
+            tracing::debug!("Forwarding host selection to internal client ({ty:?}, {mime_type})");
+            clipboard.receive_from_host(ty, &mime_type, fd);
+        }
+    }
 }
 
 impl DataDeviceHandler for EafvilState {
@@ -90,6 +131,18 @@ impl WaylandDndGrabHandler for EafvilState {
 }
 
 delegate_data_device!(EafvilState);
+
+//
+// Primary Selection
+//
+
+impl PrimarySelectionHandler for EafvilState {
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
+    }
+}
+
+delegate_primary_selection!(EafvilState);
 
 //
 // Wl Output & Xdg Output
