@@ -501,16 +501,21 @@ matching the convention used by `emskin--window-geometry'."
          ;; actually wraps the whole compositor window.
          (outer-w (frame-pixel-width frame))
          (outer-h (+ (frame-pixel-height frame) off))
-         (raw-mb-h (or (cdr (alist-get 'menu-bar-size geom)) 0))
-         (raw-tb-h (or (cdr (alist-get 'tool-bar-size geom)) 0))
-         (tab-h (or (cdr (alist-get 'tab-bar-size geom)) 0))
+         (mb-on (> (or (frame-parameter frame 'menu-bar-lines) 0) 0))
+         (tb-on (> (or (frame-parameter frame 'tool-bar-lines) 0) 0))
+         (tab-on (> (or (frame-parameter frame 'tab-bar-lines) 0) 0))
+         (raw-mb-h (if mb-on (or (cdr (alist-get 'menu-bar-size geom)) 0) 0))
+         (raw-tb-h (if tb-on (or (cdr (alist-get 'tool-bar-size geom)) 0) 0))
+         (tab-h    (if tab-on (or (cdr (alist-get 'tab-bar-size geom)) 0) 0))
          ;; pgtk reports 0 for external GTK bar sizes. If either is 0 but
          ;; the total chrome offset is larger than the known side, derive
          ;; the missing one so both bars can be drawn in their correct
          ;; positions instead of stacking at y=0.
-         (mb-h (cond ((and (zerop raw-mb-h) (> off raw-tb-h)) (- off raw-tb-h))
+         (mb-h (cond ((not mb-on) 0)
+                     ((and (zerop raw-mb-h) (> off raw-tb-h)) (- off raw-tb-h))
                      (t raw-mb-h)))
-         (tb-h (cond ((and (zerop raw-tb-h) (> off raw-mb-h)) (- off raw-mb-h))
+         (tb-h (cond ((not tb-on) 0)
+                     ((and (zerop raw-tb-h) (> off raw-mb-h)) (- off raw-mb-h))
                      (t raw-tb-h)))
          (rects nil))
     ;; Frame outer rectangle.
@@ -624,8 +629,9 @@ otherwise focus Emacs.  Skips IPC when focus hasn't changed."
                                    (window-buffer (selected-window)))))
       (unless (eq wid emskin--last-focused-wid)
         (setq emskin--last-focused-wid wid)
-        (emskin--send `((type . "set_focus")
-                            (window_id . ,(or wid :json-null))))))))
+        (emskin--send (if wid
+                          `((type . "set_focus") (window_id . ,wid))
+                        '((type . "set_focus"))))))))
 
 (add-hook 'window-selection-change-functions #'emskin--sync-focus)
 

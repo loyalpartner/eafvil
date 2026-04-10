@@ -50,6 +50,7 @@ pub enum IncomingMessage {
     /// Tell the compositor which surface should have keyboard focus.
     /// `window_id: None` means focus Emacs; `Some(id)` means focus that app.
     SetFocus {
+        #[serde(default)]
         window_id: Option<u64>,
     },
     /// Enable/disable the crosshair overlay (caliper tool).
