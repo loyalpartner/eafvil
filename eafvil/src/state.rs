@@ -102,6 +102,9 @@ pub struct EafvilState {
     /// `Some(focus)` = prefix active, restore `focus` when done; `None` = normal.
     /// Cleared on prefix_done IPC, click, or set_focus.
     pub prefix_saved_focus: Option<Option<WlSurface>>,
+
+    /// Crosshair overlay (caliper tool).
+    pub crosshair: crate::crosshair::CrosshairOverlay,
 }
 
 impl EafvilState {
@@ -185,6 +188,7 @@ impl EafvilState {
             clipboard_init_done: false,
             primary_init_done: false,
             prefix_saved_focus: None,
+            crosshair: crate::crosshair::CrosshairOverlay::new(),
         })
     }
 

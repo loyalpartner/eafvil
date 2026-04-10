@@ -1,6 +1,7 @@
 pub mod apps;
 mod clipboard;
 mod clipboard_x11;
+mod crosshair;
 mod handlers;
 mod input;
 pub mod ipc;
@@ -276,6 +277,10 @@ fn handle_ipc_message(state: &mut EafvilState, msg: ipc::IncomingMessage) {
         }
         IncomingMessage::SetFocus { window_id } => {
             ipc_set_focus(state, window_id);
+        }
+        IncomingMessage::SetCrosshair { enabled } => {
+            tracing::debug!("IPC set_crosshair enabled={enabled}");
+            state.crosshair.enabled = enabled;
         }
     }
 }

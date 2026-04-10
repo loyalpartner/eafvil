@@ -5,10 +5,15 @@ use smithay::{
         input::KeyState,
         renderer::{
             damage::OutputDamageTracker,
-            element::texture::TextureRenderElement,
+            element::{
+                memory::MemoryRenderBufferRenderElement,
+                render_elements,
+                solid::SolidColorRenderElement,
+                texture::TextureRenderElement,
+            },
             gles::{GlesRenderer, GlesTexture},
             utils::with_renderer_surface_state,
-            Renderer, Texture,
+            ImportMem, Renderer, Texture,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
@@ -19,6 +24,18 @@ use smithay::{
 };
 
 use crate::EafvilState;
+
+/// Blanket trait bundling renderer constraints for the `render_elements!` macro
+/// (which cannot parse associated-type bounds like `Renderer<TextureId = GlesTexture>`).
+trait EafvilRenderer: ImportMem + Renderer<TextureId = GlesTexture> {}
+impl<R: ImportMem + Renderer<TextureId = GlesTexture>> EafvilRenderer for R {}
+
+render_elements! {
+    pub CustomElement<R> where R: EafvilRenderer;
+    Mirror=TextureRenderElement<GlesTexture>,
+    Solid=SolidColorRenderElement,
+    Label=MemoryRenderBufferRenderElement<R>,
+}
 
 const REFRESH_RATE: i32 = 60_000;
 
@@ -55,7 +72,7 @@ fn build_mirror_elements(
     state: &mut EafvilState,
     renderer: &mut GlesRenderer,
     scale: f64,
-) -> Vec<TextureRenderElement<GlesTexture>> {
+) -> Vec<CustomElement<GlesRenderer>> {
     let ctx = renderer.context_id();
     let mut elements = Vec::new();
     for app in state.apps.windows_mut() {
@@ -143,7 +160,7 @@ fn build_mirror_elements(
                     None, // opaque_regions
                     smithay::backend::renderer::element::Kind::Unspecified,
                 );
-                elements.push(element);
+                elements.push(element.into());
             }
         }
     }
@@ -173,18 +190,31 @@ fn render_frame(
         // Build mirror elements by referencing the surface's committed texture
         // directly — zero copy, always up-to-date.
         let scale = output.current_scale().fractional_scale();
-        let mirror_elements = build_mirror_elements(state, renderer, scale);
+        let mut custom_elements = build_mirror_elements(state, renderer, scale);
+
+        // Crosshair overlay (on top of everything).
+        if let Some(pointer) = state.seat.get_pointer() {
+            let cursor = pointer.current_location();
+            let (solids, label) =
+                state.crosshair.build_elements(renderer, cursor, size, scale);
+            for s in solids {
+                custom_elements.push(s.into());
+            }
+            if let Some(l) = label {
+                custom_elements.push(l.into());
+            }
+        }
 
         let render_scale = 1.0;
         if let Err(e) =
-            smithay::desktop::space::render_output::<_, TextureRenderElement<GlesTexture>, _, _>(
+            smithay::desktop::space::render_output::<_, CustomElement<GlesRenderer>, _, _>(
                 output,
                 renderer,
                 &mut framebuffer,
                 render_scale,
                 0,
                 [&state.space],
-                &mirror_elements,
+                &custom_elements,
                 damage_tracker,
                 [1.0, 1.0, 1.0, 1.0],
             )

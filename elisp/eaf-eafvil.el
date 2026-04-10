@@ -17,6 +17,18 @@
   :type '(choice (const nil) string)
   :group 'eaf-eafvil)
 
+(defcustom eaf-eafvil-crosshair nil
+  "Non-nil to enable the crosshair overlay (caliper tool).
+Shows crosshair lines and coordinates at the cursor position."
+  :type 'boolean
+  :group 'eaf-eafvil
+  :initialize #'custom-initialize-default
+  :set (lambda (sym val)
+         (set-default sym val)
+         (when (bound-and-true-p eaf-eafvil--process)
+           (eaf-eafvil--send `((type . "set_crosshair")
+                               (enabled . ,(if val t :json-false)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Internal state
 ;; ---------------------------------------------------------------------------
@@ -130,7 +142,9 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
   (let ((type (gethash "type" msg "")))
     (cond
      ((string= type "connected")
-      (message "eafvil: connected (version %s)" (gethash "version" msg "?")))
+      (message "eafvil: connected (version %s)" (gethash "version" msg "?"))
+      (when eaf-eafvil-crosshair
+        (eaf-eafvil--send `((type . "set_crosshair") (enabled . t)))))
      ((string= type "error")
       (message "eafvil error: %s" (gethash "msg" msg "")))
      ((string= type "window_created")
@@ -237,6 +251,11 @@ The compositor only acts if it previously redirected focus for a prefix key."
 ;; ---------------------------------------------------------------------------
 ;; Public API
 ;; ---------------------------------------------------------------------------
+
+(defun eaf-eafvil-toggle-crosshair ()
+  "Toggle the crosshair overlay (caliper tool)."
+  (interactive)
+  (customize-set-variable 'eaf-eafvil-crosshair (not eaf-eafvil-crosshair)))
 
 (defun eaf-eafvil-connect ()
   "Connect to the eafvil IPC socket (auto-discovers path)."

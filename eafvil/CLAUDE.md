@@ -7,9 +7,11 @@
 ## Architecture
 - Nested Wayland compositor using smithay, hosting Emacs inside a winit window
 - First toplevel = Emacs (fullscreen), subsequent toplevels = EAF app windows managed by AppManager
-- IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, forward_key, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed
+- IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, prefix_done, set_focus, set_crosshair, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror, request_activation_token. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed, focus_view, activation_token, xwayland_ready
 - Elisp client: `mvp/elisp/eaf-eafvil.el` — auto-connects via parent PID socket discovery, syncs geometry on `window-size-change-functions` with change-detection guard
 - Mirror system: same EAF app displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `eaf-eafvil--mirror-table`
+- Keyboard input: compositor detects Emacs prefix keys (C-x, C-c, M-x) via `input_intercept`, redirects focus to Emacs; `prefix_done` IPC restores focus. `set_focus` IPC for explicit focus control. Prefix state: `Option<Option<WlSurface>>` (outer None = inactive)
+- `AppWindow::wl_surface()` returns primary WlSurface (Wayland toplevel or X11 fallback)
 - grabs/ directory is placeholder code for future move/resize support
 
 ## Key Gotchas
@@ -34,6 +36,9 @@
 - Mirror input: pointer `under_position` for mirrors needs offset compensation (`pos - mapped_pos`) so smithay computes correct surface-local coords
 - Mirror scaling: aspect-fit with top-left alignment; coordinate mapping in `mirror_under` uses `rel.downscale(ratio)` to map mirror→source; `AppManager::aspect_fit_ratio()` returns None for zero-size to prevent NaN
 - `render_output`'s second type param is the custom_elements type (not space element type); `render_scale` (value 1.0) is actually the `alpha` parameter
+- `render_elements!` macro cannot parse associated-type bounds (`Renderer<TextureId = GlesTexture>`) — define a blanket helper trait as workaround
+- Custom overlays: `SolidColorRenderElement` for shapes, `MemoryRenderBuffer` + bitmap font for text. `CommitCounter` must be stored in struct and incremented on change — `default()` every frame defeats damage tracking
+- Elisp `defcustom` with `:set` that references later-defined vars: use `:initialize #'custom-initialize-default` + `bound-and-true-p` to avoid void-variable at load time
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)

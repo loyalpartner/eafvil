@@ -52,6 +52,10 @@ pub enum IncomingMessage {
     SetFocus {
         window_id: Option<u64>,
     },
+    /// Enable/disable the crosshair overlay (caliper tool).
+    SetCrosshair {
+        enabled: bool,
+    },
 }
 
 /// eafvil → Emacs
