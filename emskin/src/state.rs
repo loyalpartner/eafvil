@@ -1,6 +1,7 @@
 use std::{ffi::OsString, sync::Arc};
 
 use smithay::{
+    backend::{renderer::gles::GlesRenderer, winit::WinitGraphicsBackend},
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
     reexports::{
@@ -16,6 +17,7 @@ use smithay::{
     utils::{Logical, Point},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        dmabuf::{DmabufGlobal, DmabufState},
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
@@ -47,6 +49,10 @@ pub struct EmskinState {
     pub loop_signal: LoopSignal,
     pub loop_handle: LoopHandle<'static, EmskinState>,
 
+    /// Winit graphics backend (renderer + window). Stored here so
+    /// `DmabufHandler::dmabuf_imported` can access the renderer.
+    pub backend: Option<WinitGraphicsBackend<GlesRenderer>>,
+
     // Smithay State
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -60,6 +66,9 @@ pub struct EmskinState {
     pub xdg_decoration_state: XdgDecorationState,
     pub xdg_activation_state: XdgActivationState,
     pub xwayland_shell_state: XWaylandShellState,
+    pub dmabuf_state: DmabufState,
+    /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
+    pub dmabuf_global: Option<DmabufGlobal>,
     pub popups: PopupManager,
 
     // XWayland
@@ -147,6 +156,8 @@ impl EmskinState {
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
 
+        let dmabuf_state = DmabufState::new();
+
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
 
@@ -175,6 +186,8 @@ impl EmskinState {
             loop_handle,
             socket_name,
 
+            backend: None,
+
             compositor_state,
             xdg_shell_state,
             shm_state,
@@ -187,6 +200,8 @@ impl EmskinState {
             xdg_decoration_state,
             xdg_activation_state,
             xwayland_shell_state,
+            dmabuf_state,
+            dmabuf_global: None,
             popups,
             xwm: None,
             xdisplay: None,

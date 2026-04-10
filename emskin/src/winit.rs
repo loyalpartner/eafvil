@@ -364,11 +364,21 @@ pub fn init_winit(
 
     state.space.map_output(&output, (0, 0));
 
+    init_dmabuf(&mut backend, state);
+
+    state.backend = Some(backend);
+
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
 
     event_loop
         .handle()
         .insert_source(winit, move |event, _, state| {
+            // Temporarily take backend out of state to avoid double &mut borrow
+            // (the event handlers need &mut state AND &mut backend simultaneously).
+            let mut backend = state
+                .backend
+                .take()
+                .expect("backend missing in winit callback");
             match event {
                 WinitEvent::Resized { size, scale_factor } => {
                     let int_scale = scale_factor.ceil() as i32;
@@ -410,6 +420,7 @@ pub fn init_winit(
                         // Release all stuck keys to prevent phantom modifiers
                         // after Alt+Tab round-trip (the host eats the release).
                         let Some(keyboard) = state.seat.get_keyboard() else {
+                            state.backend = Some(backend);
                             return;
                         };
                         let pressed = keyboard.pressed_keys();
@@ -434,7 +445,44 @@ pub fn init_winit(
                     }
                 }
             };
+            state.backend = Some(backend);
         })?;
 
     Ok(())
+}
+
+fn init_dmabuf(backend: &mut WinitGraphicsBackend<GlesRenderer>, state: &mut EmskinState) {
+    use smithay::backend::{egl::EGLDevice, renderer::ImportDma};
+    use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
+
+    let dmabuf_formats = backend.renderer().dmabuf_formats();
+
+    let render_node = EGLDevice::device_for_display(backend.renderer().egl_context().display())
+        .and_then(|device| device.try_get_render_node())
+        .ok()
+        .flatten();
+
+    let global = match render_node.and_then(|node| {
+        DmabufFeedbackBuilder::new(node.dev_id(), dmabuf_formats.clone())
+            .build()
+            .ok()
+            .map(|fb| (node, fb))
+    }) {
+        Some((node, feedback)) => {
+            tracing::info!("DMA-BUF v4 initialized (render node: {node:?})");
+            state
+                .dmabuf_state
+                .create_global_with_default_feedback::<EmskinState>(
+                    &state.display_handle,
+                    &feedback,
+                )
+        }
+        None => {
+            tracing::info!("DMA-BUF v3 initialized (no render node or feedback build failed)");
+            state
+                .dmabuf_state
+                .create_global::<EmskinState>(&state.display_handle, dmabuf_formats)
+        }
+    };
+    state.dmabuf_global = Some(global);
 }

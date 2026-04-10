@@ -24,6 +24,7 @@ rev = "d28cf3808"
 default-features = false
 features = [
     "backend_winit",
+    "backend_drm",
     "wayland_frontend",
     "desktop",
     "xwayland",
