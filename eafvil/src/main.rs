@@ -10,8 +10,11 @@ mod utils;
 mod winit;
 
 use clap::Parser;
+use include_dir::{include_dir, Dir};
 use smithay::reexports::wayland_server::Display;
 pub use state::EafvilState;
+
+static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../elisp");
 
 /// Nested Wayland compositor for Emacs Application Framework.
 #[derive(Parser, Debug)]
@@ -48,6 +51,10 @@ struct Cli {
     /// XKB options (e.g. "ctrl:nocaps").
     #[arg(long)]
     xkb_options: Option<String>,
+
+    /// Standalone mode: auto-load built-in elisp without user config.
+    #[arg(long)]
+    standalone: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -96,7 +103,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     crate::winit::init_winit(&mut event_loop, &mut state)?;
 
     if !cli.no_spawn {
-        state.pending_command = Some((cli.command.clone(), cli.command_args.clone()));
+        state.pending_command = Some(state::PendingCommand {
+            command: cli.command.clone(),
+            args: cli.command_args.clone(),
+            standalone: cli.standalone,
+        });
     }
 
     start_xwayland(event_loop.handle(), &mut state);
@@ -162,6 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = child.wait();
     }
 
+    // Clean up extracted elisp files
+    if let Some(ref dir) = state.elisp_dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     Ok(())
 }
 
@@ -194,16 +210,37 @@ fn register_ipc_source(
     Ok(())
 }
 
-fn spawn_child(command: &str, args: &[String], x_display: u32, state: &mut EafvilState) {
+fn spawn_child(
+    command: &str,
+    args: &[String],
+    x_display: u32,
+    standalone: bool,
+    state: &mut EafvilState,
+) {
     let Some(socket_name) = state.socket_name.to_str() else {
         tracing::error!("Wayland socket name is not valid UTF-8, cannot spawn child");
         return;
     };
+
+    let mut full_args: Vec<String> = Vec::new();
+
+    if standalone {
+        if let Some(elisp_dir) = extract_embedded_elisp() {
+            full_args.push("--directory".to_string());
+            full_args.push(elisp_dir.to_string_lossy().into_owned());
+            full_args.push("-l".to_string());
+            full_args.push("eaf-eafvil".to_string());
+            state.elisp_dir = Some(elisp_dir);
+        }
+    }
+
+    full_args.extend_from_slice(args);
+
     tracing::info!(
-        "Spawning: {command} {args:?} (WAYLAND_DISPLAY={socket_name} DISPLAY=:{x_display})"
+        "Spawning: {command} {full_args:?} (WAYLAND_DISPLAY={socket_name} DISPLAY=:{x_display})"
     );
     match std::process::Command::new(command)
-        .args(args)
+        .args(&full_args)
         .env("WAYLAND_DISPLAY", socket_name)
         .env("DISPLAY", format!(":{x_display}"))
         // Ensure child apps prefer Wayland even when host is X11.
@@ -219,10 +256,35 @@ fn spawn_child(command: &str, args: &[String], x_display: u32, state: &mut Eafvi
     }
 }
 
+fn runtime_dir() -> String {
+    std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string())
+}
+
+/// Extract embedded elisp files to `$XDG_RUNTIME_DIR/eafvil-<pid>/elisp/`.
+fn extract_embedded_elisp() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(format!(
+        "{}/eafvil-{}/elisp",
+        runtime_dir(),
+        std::process::id()
+    ));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::error!("Failed to create elisp dir {}: {e}", dir.display());
+        return None;
+    }
+    for file in ELISP_DIR.files() {
+        let dest = dir.join(file.path());
+        if let Err(e) = std::fs::write(&dest, file.contents()) {
+            tracing::error!("Failed to write {}: {e}", dest.display());
+            return None;
+        }
+    }
+    tracing::info!("Extracted embedded elisp to {}", dir.display());
+    Some(dir)
+}
+
 fn default_ipc_path() -> std::path::PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     let pid = std::process::id();
-    std::path::PathBuf::from(format!("{runtime_dir}/eafvil-{pid}.ipc"))
+    std::path::PathBuf::from(format!("{}/eafvil-{pid}.ipc", runtime_dir()))
 }
 
 fn handle_ipc_message(state: &mut EafvilState, msg: ipc::IncomingMessage) {
@@ -513,8 +575,8 @@ fn start_xwayland(
                     tracing::info!("XWayland ready on :{display_number}");
 
                     // Spawn child now that both WAYLAND_DISPLAY and DISPLAY are set.
-                    if let Some((cmd, args)) = state.pending_command.take() {
-                        spawn_child(&cmd, &args, display_number, state);
+                    if let Some(pc) = state.pending_command.take() {
+                        spawn_child(&pc.command, &pc.args, display_number, pc.standalone, state);
                     }
                 }
                 Err(e) => {

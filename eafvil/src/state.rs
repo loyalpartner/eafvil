@@ -29,6 +29,12 @@ use smithay::{
     xwayland::X11Wm,
 };
 
+pub struct PendingCommand {
+    pub command: String,
+    pub args: Vec<String>,
+    pub standalone: bool,
+}
+
 pub struct EafvilState {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -74,6 +80,9 @@ pub struct EafvilState {
     /// Handle to the spawned Emacs process
     pub emacs_child: Option<std::process::Child>,
 
+    /// Path to extracted elisp dir (for cleanup on exit).
+    pub elisp_dir: Option<std::path::PathBuf>,
+
     /// Pending fullscreen request to forward to host window.
     /// Some(true) = request fullscreen, Some(false) = exit fullscreen
     pub pending_fullscreen: Option<bool>,
@@ -88,7 +97,7 @@ pub struct EafvilState {
     pub emacs_app_id: Option<String>,
 
     /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
-    pub pending_command: Option<(String, Vec<String>)>,
+    pub pending_command: Option<PendingCommand>,
 
     /// Clipboard synchronization proxy (Wayland or X11 backend, None if unavailable)
     pub clipboard: Option<crate::clipboard::HostClipboard>,
@@ -179,6 +188,7 @@ impl EafvilState {
             emacs_surface: None,
             initial_size_settled: false,
             emacs_child: None,
+            elisp_dir: None,
             pending_fullscreen: None,
             pending_maximize: None,
             emacs_title: None,
