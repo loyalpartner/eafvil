@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/banner.png" alt="emskin — Emacs dressed in a Wayland compositor" width="720"/>
+</p>
+
 # eafvil
 
 嵌套 Wayland 合成器，为 [Emacs Application Framework](https://github.com/emacs-eaf/emacs-application-framework) 提供原生 Wayland 应用嵌入能力。
