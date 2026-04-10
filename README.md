@@ -6,22 +6,23 @@
 
 > 给 Emacs 加上皮肤 — Dress Emacs in a Wayland skin.
 
-嵌套 Wayland 合成器，为 [Emacs Application Framework](https://github.com/emacs-eaf/emacs-application-framework) 提供原生 Wayland 应用嵌入能力。
+emskin 是一个嵌套 Wayland 合成器：在一个 winit 窗口内运行独立的 Wayland/XWayland 合成器，Emacs 作为主窗口全屏铺满，**任意 Wayland 或 X11 程序**（浏览器、终端、视频播放器、PDF 阅读器、IDE 等）都可以作为子窗口，由 Emacs 通过 IPC 精确控制位置、大小、可见性和焦点——就像这些程序被原生嵌入到 Emacs 里一样。
+
+它最初为 [Emacs Application Framework](https://github.com/emacs-eaf/emacs-application-framework) 的 Wayland 后端而设计，但不绑定 EAF：`emskin-open-native-app` 可以把任何外部程序当作一块"嵌入式 buffer"挂到当前 Emacs 窗口里。
 
 > **迁移提示**（原 `eafvil` 用户）：本项目已从 `eafvil` 更名为 `emskin`。请将 `(require 'eaf-eafvil)` 改为 `(require 'emskin)`，`load-path` 指向 `…/emskin/elisp`，并重新编译二进制（路径和名称均已变更）。公开命令 `eaf-open-app` / `eaf-open-native-app` 分别重命名为 `emskin-open-app` / `emskin-open-native-app`。
-
-emskin 在一个 winit 窗口内运行独立的 Wayland 合成器，Emacs 作为主窗口全屏运行，EAF 应用作为子窗口叠加在指定区域。
 
 ![demo](screenshots/demo.gif)
 
 ## 特性
 
-- Emacs 全屏嵌入，EAF 应用窗口由 Emacs 通过 IPC 控制位置和大小
-- 窗口镜像 — 同一 EAF 应用可在多个 Emacs 窗口中显示（GPU 纹理共享，零拷贝）
-- 主机剪贴板双向同步
-- Popup 支持（右键菜单、下拉框等）
-- xdg_activation_v1 焦点转移
-- 通过 CLI 参数指定键盘布局（`--xkb-layout` 等）
+- **任意程序嵌入** — 原生 Wayland 与 XWayland 双协议支持，可承载 GTK / Qt / Electron / X11 程序
+- **Emacs 控制几何** — 每个嵌入窗口的位置、大小、可见性、焦点均由 Emacs 通过 IPC 精确控制
+- **窗口镜像** — 同一个程序可在多个 Emacs 窗口中显示（GPU 纹理共享，零拷贝）
+- **主机剪贴板双向同步**（Wayland 与 X11）
+- **Popup 支持**（右键菜单、下拉框、补全浮层等）
+- **xdg_activation_v1 焦点转移**（启动新应用时自动获取焦点）
+- **通过 CLI 参数指定键盘布局**（`--xkb-layout` 等）
 
 ## 依赖
 
@@ -133,7 +134,7 @@ emskin/         Rust 嵌套 Wayland 合成器
   src/
     main.rs       入口，CLI 解析，事件循环
     state.rs      合成器状态
-    apps.rs       EAF 应用窗口管理
+    apps.rs       嵌入程序窗口管理
     input.rs      键盘/鼠标输入处理
     clipboard.rs  剪贴板同步
     winit.rs      winit 窗口后端

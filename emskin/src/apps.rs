@@ -10,7 +10,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-/// An embedded EAF application window.
+/// An embedded embedded application window.
 pub struct AppWindow {
     pub window_id: u64,
     pub window: Window,
@@ -26,7 +26,7 @@ pub struct AppWindow {
     pub mirrors: HashMap<u64, MirrorView>,
 }
 
-/// A mirror view of an EAF app window.
+/// A mirror view of an embedded app window.
 pub struct MirrorView {
     pub geometry: Rectangle<i32, Logical>,
     pub render_id: smithay::backend::renderer::element::Id,
@@ -81,7 +81,7 @@ impl AppWindow {
     }
 }
 
-/// Tracks all live EAF application windows.
+/// Tracks all live embedded application windows.
 #[derive(Default)]
 pub struct AppManager {
     windows: HashMap<u64, AppWindow>,
@@ -133,7 +133,7 @@ impl AppManager {
             .find(|w| w.window.wl_surface().map(|s| &*s == wl).unwrap_or(false))
     }
 
-    /// Collect EAF app windows whose pending geometry has timed out.
+    /// Collect embedded app windows whose pending geometry has timed out.
     /// Returns (window_id, window, geo) for each; caller must `map_element`.
     pub fn collect_timed_out(
         &mut self,

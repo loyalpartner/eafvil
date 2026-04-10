@@ -138,7 +138,7 @@ impl EmskinState {
                     let clicked = self.surface_under(pos).map(|(s, _)| s);
                     let focus = clicked.or_else(|| self.emacs_surface.clone());
 
-                    // Left-click on an EAF app → tell Emacs to select that window.
+                    // Left-click on an embedded app → tell Emacs to select that window.
                     if event.button() == Some(MouseButton::Left) {
                         if let Some((window_id, view_id, _)) = self.apps.mirror_under(pos) {
                             self.ipc.send(crate::ipc::OutgoingMessage::FocusView {

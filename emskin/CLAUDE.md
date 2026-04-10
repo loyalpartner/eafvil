@@ -6,10 +6,10 @@
 
 ## Architecture
 - Nested Wayland compositor using smithay, hosting Emacs inside a winit window
-- First toplevel = Emacs (fullscreen), subsequent toplevels = EAF app windows managed by AppManager
+- First toplevel = Emacs (fullscreen), subsequent toplevels = **arbitrary embedded programs** (any Wayland or XWayland client) managed by AppManager. Not limited to EAF — any GTK/Qt/Electron/X11 app can be embedded as a child window whose geometry is controlled by Emacs via IPC.
 - IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, prefix_done, set_focus, set_crosshair, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror, request_activation_token. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed, focus_view, activation_token, xwayland_ready
 - Elisp client: `elisp/emskin.el` — auto-connects via parent PID socket discovery, syncs geometry on `window-size-change-functions` with change-detection guard
-- Mirror system: same EAF app displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `emskin--mirror-table`
+- Mirror system: same embedded program displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `emskin--mirror-table`
 - Keyboard input: compositor detects Emacs prefix keys (C-x, C-c, M-x) via `input_intercept`, redirects focus to Emacs; `prefix_done` IPC restores focus. `set_focus` IPC for explicit focus control. Prefix state: `Option<Option<WlSurface>>` (outer None = inactive)
 - `AppWindow::wl_surface()` returns primary WlSurface (Wayland toplevel or X11 fallback)
 - grabs/ directory is placeholder code for future move/resize support
@@ -26,8 +26,8 @@
 - Host keyboard layout: smithay winit backend does NOT expose the host's keymap. Use `wayland-client` to separately connect, receive `wl_keyboard.keymap`, then `KeyboardHandle::set_keymap_from_string()` — env vars (`XKB_DEFAULT_*`) are unreliable on KDE Wayland
 - pgtk Emacs: `frame-geometry` returns 0 for `menu-bar-size` (GTK external menu-bar architectural limitation, not a bug). Compute exact bar height via compositor IPC: `offset = surface_height - frame-pixel-height`
 - `window-pixel-edges` is relative to native frame (excludes external menu-bar/toolbar); `window-body-pixel-edges` bottom = top of mode-line
-- EAF app windows must be mapped to space at 1×1 in `new_toplevel` (otherwise on_commit and initial configure don't fire); actual size arrives via `set_geometry` IPC
-- Host resize must only resize the Emacs surface; EAF app window sizes are controlled by Emacs via IPC
+- embedded app windows must be mapped to space at 1×1 in `new_toplevel` (otherwise on_commit and initial configure don't fire); actual size arrives via `set_geometry` IPC
+- Host resize must only resize the Emacs surface; embedded app window sizes are controlled by Emacs via IPC
 - Mirror rendering: `TextureRenderElement` position is Physical coords — must use `output.current_scale().fractional_scale()` for logical→physical conversion, NOT hardcode 1.0
 - Mirror rendering: must call `import_surface_tree` BEFORE `with_renderer_surface_state` to get texture — otherwise texture is None on frames where surface just committed
 - Mirror rendering: use stable `Id` (created once in `add_mirror`, stored in `MirrorView`) — `Id::new()` every frame causes damage tracker to flicker

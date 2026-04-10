@@ -109,7 +109,7 @@ pub enum OutgoingMessage {
         width: i32,
         height: i32,
     },
-    /// User clicked on an EAF app — Emacs should select the corresponding window.
+    /// User clicked on an embedded app — Emacs should select the corresponding window.
     /// view_id=0 means the source window; otherwise it's a mirror view_id.
     FocusView {
         window_id: u64,

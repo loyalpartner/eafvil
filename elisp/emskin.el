@@ -56,7 +56,7 @@ header-line/mode-line, and the echo area with coordinates and sizes."
 Computed once from compositor-reported surface height.")
 
 (defvar-local emskin--window-id nil
-  "emskin window_id for the EAF app embedded in this buffer.")
+  "emskin window_id for the embedded app embedded in this buffer.")
 
 (defvar-local emskin--visible nil
   "Whether this EAF buffer is currently displayed in an Emacs window.")
@@ -67,7 +67,7 @@ Computed once from compositor-reported surface height.")
 ;; Mirror tracking: window-id → (source-emacs-window . mirror-alist)
 ;; mirror-alist: ((emacs-window-id . view-id) ...)
 (defvar emskin--mirror-table (make-hash-table :test 'eql)
-  "Tracks source and mirror windows per EAF app.
+  "Tracks source and mirror windows per embedded app.
 Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 
 (defvar emskin--last-focused-wid 'unset
@@ -213,7 +213,7 @@ VIEW-ID 0 means the source window; otherwise look up the mirror alist."
       (select-window target))))
 
 (defun emskin--on-window-created (window-id title)
-  "Create/display a buffer for the new EAF app and send initial geometry."
+  "Create/display a buffer for the new embedded app and send initial geometry."
   (let* ((buf-name (format "*eaf: %s*" (if (string-empty-p title) "app" title)))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf
@@ -226,7 +226,7 @@ VIEW-ID 0 means the source window; otherwise look up the mirror alist."
                           (inhibit-same-window . t)))
     (when-let ((win (get-buffer-window buf t)))
       (emskin--report-geometry window-id win))
-    (message "emskin: EAF app ready (id=%s)" window-id)))
+    (message "emskin: embedded app ready (id=%s)" window-id)))
 
 (defun emskin--find-buffer (window-id)
   "Return the buffer whose `emskin--window-id' equals WINDOW-ID, or nil."
@@ -630,7 +630,7 @@ otherwise focus Emacs.  Skips IPC when focus hasn't changed."
 (add-hook 'window-selection-change-functions #'emskin--sync-focus)
 
 ;; ---------------------------------------------------------------------------
-;; Launch an EAF application
+;; Launch an embedded application
 ;; ---------------------------------------------------------------------------
 
 (defcustom emskin-demo-dir
@@ -659,7 +659,7 @@ CALLBACK receives the token string (or nil if unavailable)."
     (emskin--send '((type . "request_activation_token")))))
 
 (defun emskin-open-app (app-name)
-  "Launch EAF application APP-NAME (Python script in `emskin-demo-dir')."
+  "Launch embedded application APP-NAME (Python script in `emskin-demo-dir')."
   (interactive "sApp name: ")
   (let ((script (expand-file-name (format "%s.py" app-name) emskin-demo-dir)))
     (unless (file-exists-p script)

@@ -265,7 +265,7 @@ fn post_render(state: &mut EmskinState, output: &Output) {
     }
 }
 
-/// Resize only the Emacs toplevel; EAF app sizes come from Emacs via IPC.
+/// Resize only the Emacs toplevel; embedded app sizes come from Emacs via IPC.
 fn resize_emacs_surface(state: &mut EmskinState, logical: Size<i32, Logical>) {
     let Some(ref emacs_surface) = state.emacs_surface else {
         return;

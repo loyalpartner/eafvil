@@ -57,13 +57,15 @@ impl XdgShellHandler for EmskinState {
                 keyboard.set_focus(self, self.emacs_surface.clone(), serial);
             }
         } else {
-            // Subsequent toplevels = EAF app windows.
+            // Subsequent toplevels = embedded app windows.
             let window_id = self.apps.alloc_id();
             let title =
                 Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.title.clone()))
                     .unwrap_or_default();
 
-            tracing::info!("EAF app toplevel connected: window_id={window_id} title={title:?}");
+            tracing::info!(
+                "embedded app toplevel connected: window_id={window_id} title={title:?}"
+            );
 
             // Start at 1×1; actual size arrives via set_geometry IPC.
             surface.with_pending_state(|s| {

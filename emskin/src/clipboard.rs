@@ -3,7 +3,7 @@
 //! Uses `ext_data_control_v1` (preferred) or `zwlr_data_control_manager_v1` (fallback)
 //! to monitor and control the host's clipboard without requiring keyboard focus.
 //! Bridges clipboard content bidirectionally between the host compositor and
-//! internal Wayland clients (Emacs, EAF apps).
+//! internal Wayland clients (Emacs, embedded apps).
 
 use std::collections::HashMap;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};

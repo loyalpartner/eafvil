@@ -121,13 +121,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Clean up EAF app windows whose Wayland surface was destroyed.
+        // Clean up embedded app windows whose Wayland surface was destroyed.
         for app in state.apps.drain_dead() {
             state.space.unmap_elem(&app.window);
             state.ipc.send(ipc::OutgoingMessage::WindowDestroyed {
                 window_id: app.window_id,
             });
-            tracing::info!("EAF app window_id={} destroyed", app.window_id);
+            tracing::info!("embedded app window_id={} destroyed", app.window_id);
         }
 
         // Dispatch incoming IPC messages from Emacs.
@@ -164,7 +164,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect_timed_out(std::time::Duration::from_millis(100))
         {
             state.space.map_element(window, geo.loc, false);
-            tracing::debug!("EAF app window_id={window_id} geometry force-committed (timeout)");
+            tracing::debug!(
+                "embedded app window_id={window_id} geometry force-committed (timeout)"
+            );
         }
     })?;
 

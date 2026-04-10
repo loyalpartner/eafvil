@@ -49,8 +49,8 @@ impl CompositorHandler for EmskinState {
                 window.on_commit();
             }
 
-            // Pending → committed geometry transition for EAF app windows.
-            // When an EAF app commits a new buffer after a configure, atomically
+            // Pending → committed geometry transition for embedded app windows.
+            // When an embedded app commits a new buffer after a configure, atomically
             // switch its geometry so the new buffer and new position appear together.
             let commit_info = self.apps.get_mut_by_surface(&root).and_then(|app| {
                 app.pending_geometry.take().map(|pending| {
@@ -61,7 +61,7 @@ impl CompositorHandler for EmskinState {
             });
             if let Some((window, window_id, geo)) = commit_info {
                 self.space.map_element(window, geo.loc, false);
-                tracing::debug!("EAF app window_id={window_id} geometry committed: {geo:?}");
+                tracing::debug!("embedded app window_id={window_id} geometry committed: {geo:?}");
             }
         };
 
