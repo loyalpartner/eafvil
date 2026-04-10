@@ -3,10 +3,7 @@ use std::{ffi::OsString, sync::Arc};
 use smithay::{
     backend::{renderer::gles::GlesRenderer, winit::WinitGraphicsBackend},
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
-    input::{
-        pointer::CursorImageStatus,
-        Seat, SeatState,
-    },
+    input::{pointer::CursorImageStatus, Seat, SeatState},
     reexports::{
         calloop::{
             generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
@@ -145,9 +142,11 @@ pub struct EmskinState {
     /// (which cannot access the backend) and applied in `apply_pending_state`.
     pub pending_ime_allowed: Option<bool>,
 
-    /// Deferred cursor image for the winit window. Set in `cursor_image()`
-    /// callback and applied in `apply_pending_state`.
-    pub pending_cursor: Option<CursorImageStatus>,
+    /// Current cursor image status. For Named, the host cursor is used;
+    /// for Surface (GTK3/Emacs), the cursor is software-rendered each frame.
+    pub cursor_status: CursorImageStatus,
+    /// Set when cursor_status changes; consumed by apply_pending_state.
+    pub cursor_changed: bool,
 }
 
 impl EmskinState {
@@ -248,7 +247,8 @@ impl EmskinState {
             skeleton_click_absorbed: false,
             text_input_focus: None,
             pending_ime_allowed: None,
-            pending_cursor: None,
+            cursor_status: CursorImageStatus::default_named(),
+            cursor_changed: false,
         })
     }
 

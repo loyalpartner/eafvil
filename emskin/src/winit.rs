@@ -15,11 +15,14 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
-    input::{keyboard::FilterResult, pointer::CursorImageStatus},
+    input::{
+        keyboard::FilterResult,
+        pointer::{CursorImageStatus, CursorImageSurfaceData},
+    },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{calloop::EventLoop, wayland_server::protocol::wl_surface::WlSurface},
     utils::{Logical, Physical, Point, Rectangle, Size, Transform, SERIAL_COUNTER},
-    wayland::compositor::{with_surface_tree_downward, TraversalAction},
+    wayland::compositor::{with_states, with_surface_tree_downward, TraversalAction},
 };
 
 use crate::EmskinState;
@@ -68,16 +71,19 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         backend.window().set_ime_allowed(allowed);
     }
 
-    if let Some(cursor) = state.pending_cursor.take() {
+    if state.cursor_changed {
+        state.cursor_changed = false;
         let window = backend.window();
-        match cursor {
-            CursorImageStatus::Hidden => window.set_cursor_visible(false),
+        match &state.cursor_status {
             CursorImageStatus::Named(icon) => {
                 window.set_cursor_visible(true);
-                window.set_cursor(winit_crate::window::Cursor::Icon(icon));
+                window.set_cursor(winit_crate::window::Cursor::Icon(*icon));
             }
-            // Surface is normalized to Named(Default) in cursor_image()
-            CursorImageStatus::Surface(_) => {}
+            // Surface cursors are software-rendered in render_frame();
+            // hide the host cursor so it doesn't overlap.
+            CursorImageStatus::Hidden | CursorImageStatus::Surface(_) => {
+                window.set_cursor_visible(false);
+            }
         }
     }
 }
@@ -259,7 +265,52 @@ fn render_frame(
         let scale = output.current_scale().fractional_scale();
         let mut custom_elements: Vec<CustomElement<GlesRenderer>> = Vec::new();
 
-        // Skeleton: topmost. Push labels first, borders second, so labels
+        // Software cursor: topmost layer. Used for Surface cursors (GTK3/Emacs)
+        // that can't be forwarded to the host via winit's CursorIcon API.
+        if let CursorImageStatus::Surface(ref surface) = state.cursor_status {
+            if let Some(pointer) = state.seat.get_pointer() {
+                if let Err(e) = import_surface_tree(renderer, surface) {
+                    tracing::warn!("cursor import_surface_tree failed: {e:?}");
+                } else {
+                    let hotspot = with_states(surface, |data| {
+                        data.data_map
+                            .get::<CursorImageSurfaceData>()
+                            .map(|d| d.lock().unwrap().hotspot)
+                            .unwrap_or_default()
+                    });
+                    let cursor_pos = pointer.current_location() - hotspot.to_f64();
+                    let ctx = renderer.context_id();
+                    with_states(surface, |data| {
+                        let Some(rss) = data.data_map.get::<RendererSurfaceStateUserData>() else {
+                            return;
+                        };
+                        let rss = rss.lock().unwrap();
+                        let Some(texture) = rss.texture::<GlesTexture>(ctx.clone()).cloned() else {
+                            return;
+                        };
+                        let view = rss.view();
+                        custom_elements.push(
+                            TextureRenderElement::from_static_texture(
+                                Id::from_wayland_resource(surface),
+                                ctx.clone(),
+                                cursor_pos.to_physical(scale),
+                                texture,
+                                rss.buffer_scale(),
+                                rss.buffer_transform(),
+                                None, // alpha
+                                view.map(|v| v.src),
+                                view.map(|v| v.dst),
+                                None, // damage
+                                Kind::Cursor,
+                            )
+                            .into(),
+                        );
+                    });
+                }
+            }
+        }
+
+        // Skeleton: topmost debug overlay. Push labels first, borders second, so labels
         // end up above borders within the skeleton layer group.
         let output_size_log: Size<i32, Logical> = size.to_f64().to_logical(scale).to_i32_round();
         let (skel_solids, skel_labels) =

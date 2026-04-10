@@ -42,16 +42,8 @@ impl SeatHandler for EmskinState {
         _seat: &Seat<Self>,
         image: smithay::input::pointer::CursorImageStatus,
     ) {
-        tracing::trace!("cursor_image: {:?}", image);
-        // Normalize Surface → Default: winit can't render client cursor surfaces,
-        // and dropping Surface early avoids holding a WlSurface reference.
-        let image = match image {
-            smithay::input::pointer::CursorImageStatus::Surface(_) => {
-                smithay::input::pointer::CursorImageStatus::default_named()
-            }
-            other => other,
-        };
-        self.pending_cursor = Some(image);
+        self.cursor_status = image;
+        self.cursor_changed = true;
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
@@ -82,7 +74,9 @@ impl SeatHandler for EmskinState {
         // Apps using their own IM module (fcitx5-gtk via DBus) don't bind it
         // and need raw keyboard events from wl_keyboard instead.
         let mut has_ti = false;
-        ti.with_focused_text_input(|_, _| { has_ti = true; });
+        ti.with_focused_text_input(|_, _| {
+            has_ti = true;
+        });
         if self.pending_ime_allowed != Some(has_ti) {
             self.pending_ime_allowed = Some(has_ti);
         }

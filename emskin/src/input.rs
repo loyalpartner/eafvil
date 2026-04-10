@@ -83,7 +83,11 @@ impl EmskinState {
                         let loc = under.as_ref().map(|(_, p)| *p);
                         tracing::debug!(
                             "pointer focus change: {:?} -> {:?} pos=({:.0},{:.0}) loc={:?}",
-                            old_id, new_id, pos.x, pos.y, loc,
+                            old_id,
+                            new_id,
+                            pos.x,
+                            pos.y,
+                            loc,
                         );
                     }
                 }
@@ -152,7 +156,8 @@ impl EmskinState {
                     let under = self.surface_under(pos);
                     tracing::debug!(
                         "button press: pos=({:.0},{:.0}) under={:?} ptr_focus={:?}",
-                        pos.x, pos.y,
+                        pos.x,
+                        pos.y,
                         under.as_ref().map(|(s, _)| s.id()),
                         pointer.current_focus().map(|s| s.id()),
                     );
