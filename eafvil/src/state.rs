@@ -35,7 +35,7 @@ pub struct PendingCommand {
     pub standalone: bool,
 }
 
-pub struct EafvilState {
+pub struct EmskinState {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
@@ -45,14 +45,14 @@ pub struct EafvilState {
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
-    pub loop_handle: LoopHandle<'static, EafvilState>,
+    pub loop_handle: LoopHandle<'static, EmskinState>,
 
     // Smithay State
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
-    pub seat_state: SeatState<EafvilState>,
+    pub seat_state: SeatState<EmskinState>,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
@@ -68,7 +68,7 @@ pub struct EafvilState {
 
     pub seat: Seat<Self>,
 
-    // --- eafvil specific ---
+    // --- emskin specific ---
     /// The Emacs surface (first toplevel to connect)
     pub emacs_surface: Option<WlSurface>,
 
@@ -124,7 +124,7 @@ pub struct EafvilState {
     pub skeleton_click_absorbed: bool,
 }
 
-impl EafvilState {
+impl EmskinState {
     pub fn new(
         event_loop: &mut EventLoop<Self>,
         loop_handle: LoopHandle<'static, Self>,
@@ -192,7 +192,7 @@ impl EafvilState {
             xdisplay: None,
             seat,
 
-            // eafvil specific
+            // emskin specific
             emacs_surface: None,
             initial_size_settled: false,
             emacs_child: None,
@@ -213,7 +213,7 @@ impl EafvilState {
     }
 
     fn init_wayland_listener(
-        display: Display<EafvilState>,
+        display: Display<EmskinState>,
         event_loop: &mut EventLoop<Self>,
     ) -> Result<OsString, Box<dyn std::error::Error>> {
         let listening_socket = ListeningSocketSource::new_auto()?;

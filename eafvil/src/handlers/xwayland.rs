@@ -9,9 +9,9 @@ use smithay::{
     },
 };
 
-use crate::{utils::SizeExt, EafvilState};
+use crate::{utils::SizeExt, EmskinState};
 
-impl XwmHandler for EafvilState {
+impl XwmHandler for EmskinState {
     fn xwm_state(&mut self, _xwm: XwmId) -> &mut X11Wm {
         self.xwm
             .as_mut()
@@ -128,10 +128,10 @@ impl XwmHandler for EafvilState {
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {}
 }
 
-impl XWaylandShellHandler for EafvilState {
+impl XWaylandShellHandler for EmskinState {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
         &mut self.xwayland_shell_state
     }
 }
 
-delegate_xwayland_shell!(EafvilState);
+delegate_xwayland_shell!(EmskinState);

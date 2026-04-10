@@ -7,9 +7,9 @@ use smithay::{
     },
 };
 
-use crate::EafvilState;
+use crate::EmskinState;
 
-impl XdgActivationHandler for EafvilState {
+impl XdgActivationHandler for EmskinState {
     fn activation_state(&mut self) -> &mut XdgActivationState {
         &mut self.xdg_activation_state
     }
@@ -51,4 +51,4 @@ impl XdgActivationHandler for EafvilState {
     }
 }
 
-delegate_xdg_activation!(EafvilState);
+delegate_xdg_activation!(EmskinState);

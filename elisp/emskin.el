@@ -1,4 +1,4 @@
-;;; eaf-eafvil.el --- Emacs IPC client for the eafvil Wayland compositor  -*- lexical-binding: t; -*-
+;;; emskin.el --- Emacs IPC client for the emskin Wayland compositor  -*- lexical-binding: t; -*-
 
 (require 'json)
 (require 'cl-lib)
@@ -7,97 +7,97 @@
 ;; Customization
 ;; ---------------------------------------------------------------------------
 
-(defgroup eaf-eafvil nil
-  "Interface to the eafvil nested Wayland compositor."
-  :prefix "eaf-eafvil-"
+(defgroup emskin nil
+  "Interface to the emskin nested Wayland compositor."
+  :prefix "emskin-"
   :group 'applications)
 
-(defcustom eaf-eafvil-ipc-path nil
+(defcustom emskin-ipc-path nil
   "Explicit IPC socket path.  When nil, auto-discovered via parent PID."
   :type '(choice (const nil) string)
-  :group 'eaf-eafvil)
+  :group 'emskin)
 
-(defcustom eaf-eafvil-crosshair nil
+(defcustom emskin-crosshair nil
   "Non-nil to enable the crosshair overlay (caliper tool).
 Shows crosshair lines and coordinates at the cursor position."
   :type 'boolean
-  :group 'eaf-eafvil
+  :group 'emskin
   :initialize #'custom-initialize-default
   :set (lambda (sym val)
          (set-default sym val)
-         (when (bound-and-true-p eaf-eafvil--process)
-           (eaf-eafvil--send `((type . "set_crosshair")
+         (when (bound-and-true-p emskin--process)
+           (emskin--send `((type . "set_crosshair")
                                (enabled . ,(if val t :json-false)))))))
 
-(defcustom eaf-eafvil-skeleton nil
+(defcustom emskin-skeleton nil
   "Non-nil to enable the skeleton overlay (frame layout inspector).
 Draws wireframe rectangles around frame chrome, every window, its
 header-line/mode-line, and the echo area with coordinates and sizes."
   :type 'boolean
-  :group 'eaf-eafvil
+  :group 'emskin
   :initialize #'custom-initialize-default
   :set (lambda (sym val)
          (set-default sym val)
-         (when (bound-and-true-p eaf-eafvil--process)
-           (eaf-eafvil--push-skeleton val))))
+         (when (bound-and-true-p emskin--process)
+           (emskin--push-skeleton val))))
 
 ;; ---------------------------------------------------------------------------
 ;; Internal state
 ;; ---------------------------------------------------------------------------
 
-(defvar eaf-eafvil--process nil
-  "The network process connected to eafvil's IPC socket.")
+(defvar emskin--process nil
+  "The network process connected to emskin's IPC socket.")
 
-(defvar eaf-eafvil--read-buf ""
-  "Accumulates raw bytes received from eafvil.")
+(defvar emskin--read-buf ""
+  "Accumulates raw bytes received from emskin.")
 
-(defvar eaf-eafvil--header-offset nil
+(defvar emskin--header-offset nil
   "Pixel height of external GTK bars (menu-bar + tool-bar).
 Computed once from compositor-reported surface height.")
 
-(defvar-local eaf-eafvil--window-id nil
-  "eafvil window_id for the EAF app embedded in this buffer.")
+(defvar-local emskin--window-id nil
+  "emskin window_id for the EAF app embedded in this buffer.")
 
-(defvar-local eaf-eafvil--visible nil
+(defvar-local emskin--visible nil
   "Whether this EAF buffer is currently displayed in an Emacs window.")
 
-(defvar eaf-eafvil--displayed-table (make-hash-table :test 'eql)
-  "Reusable hash-table for `eaf-eafvil--sync-all' to avoid per-call allocation.")
+(defvar emskin--displayed-table (make-hash-table :test 'eql)
+  "Reusable hash-table for `emskin--sync-all' to avoid per-call allocation.")
 
 ;; Mirror tracking: window-id → (source-emacs-window . mirror-alist)
 ;; mirror-alist: ((emacs-window-id . view-id) ...)
-(defvar eaf-eafvil--mirror-table (make-hash-table :test 'eql)
+(defvar emskin--mirror-table (make-hash-table :test 'eql)
   "Tracks source and mirror windows per EAF app.
 Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 
-(defvar eaf-eafvil--last-focused-wid 'unset
+(defvar emskin--last-focused-wid 'unset
   "Last window-id sent via set_focus IPC.  Used as change-detection guard.")
 
-(defvar eaf-eafvil--next-view-id 0
+(defvar emskin--next-view-id 0
   "Counter for generating unique mirror view IDs.")
 
-(defvar eaf-eafvil--pending-activations nil
+(defvar emskin--pending-activations nil
   "Queue of callbacks awaiting activation tokens (FIFO).")
 
 ;; ---------------------------------------------------------------------------
 ;; Socket discovery
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--ipc-path ()
+(defun emskin--ipc-path ()
   "Return the IPC socket path, auto-discovering via parent PID when needed."
-  (or eaf-eafvil-ipc-path
+  (or emskin-ipc-path
       (let* ((ppid (string-trim
                     (shell-command-to-string
                      (format "cat /proc/%d/status | awk '/^PPid:/{print $2}'"
                              (emacs-pid)))))
              (runtime-dir (or (getenv "XDG_RUNTIME_DIR") "/tmp")))
-        (format "%s/eafvil-%s.ipc" runtime-dir ppid))))
+        (format "%s/emskin-%s.ipc" runtime-dir ppid))))
 
 ;; ---------------------------------------------------------------------------
 ;; Codec: 4-byte u32 LE length prefix + JSON payload
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--encode-message (msg)
+(defun emskin--encode-message (msg)
   "Encode MSG (alist/plist) as a framed JSON message (unibyte string)."
   (let* ((json (encode-coding-string (json-encode msg) 'utf-8 t))
          (len (length json))
@@ -108,81 +108,81 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
                   (logand (ash len -24) #xff))))
     (concat prefix json)))
 
-(defun eaf-eafvil--decode-next ()
-  "Extract one complete message from `eaf-eafvil--read-buf'.
+(defun emskin--decode-next ()
+  "Extract one complete message from `emskin--read-buf'.
 Returns parsed JSON (hash-table) or nil if more data is needed.
 Coerces buffer to unibyte so aref always yields raw byte values 0-255."
-  (when (>= (length eaf-eafvil--read-buf) 4)
-    (let* ((b0 (aref eaf-eafvil--read-buf 0))
-           (b1 (aref eaf-eafvil--read-buf 1))
-           (b2 (aref eaf-eafvil--read-buf 2))
-           (b3 (aref eaf-eafvil--read-buf 3))
+  (when (>= (length emskin--read-buf) 4)
+    (let* ((b0 (aref emskin--read-buf 0))
+           (b1 (aref emskin--read-buf 1))
+           (b2 (aref emskin--read-buf 2))
+           (b3 (aref emskin--read-buf 3))
            (len (+ b0 (ash b1 8) (ash b2 16) (ash b3 24))))
-      (when (>= (length eaf-eafvil--read-buf) (+ 4 len))
+      (when (>= (length emskin--read-buf) (+ 4 len))
         (let* ((payload (decode-coding-string
-                         (substring eaf-eafvil--read-buf 4 (+ 4 len)) 'utf-8))
+                         (substring emskin--read-buf 4 (+ 4 len)) 'utf-8))
                (obj (json-parse-string payload)))
-          (setq eaf-eafvil--read-buf
-                (substring eaf-eafvil--read-buf (+ 4 len)))
+          (setq emskin--read-buf
+                (substring emskin--read-buf (+ 4 len)))
           obj)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Process filter (calloop equivalent on the Emacs side)
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--filter (proc data)
+(defun emskin--filter (proc data)
   "Accumulate DATA from PROC and dispatch complete messages."
   (ignore proc)
-  (setq eaf-eafvil--read-buf
-        (concat eaf-eafvil--read-buf (string-as-unibyte data)))
+  (setq emskin--read-buf
+        (concat emskin--read-buf (string-as-unibyte data)))
   (let (msg)
-    (while (setq msg (eaf-eafvil--decode-next))
-      (eaf-eafvil--dispatch msg))))
+    (while (setq msg (emskin--decode-next))
+      (emskin--dispatch msg))))
 
-(defun eaf-eafvil--sentinel (proc event)
+(defun emskin--sentinel (proc event)
   "Handle IPC connection state changes."
   (when (string-match-p "\\(closed\\|failed\\|broken\\|finished\\)" event)
-    (message "eafvil: IPC connection %s" (string-trim event))
-    (setq eaf-eafvil--process nil)))
+    (message "emskin: IPC connection %s" (string-trim event))
+    (setq emskin--process nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Message dispatch
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--dispatch (msg)
-  "Dispatch a parsed MSG hash-table from eafvil."
+(defun emskin--dispatch (msg)
+  "Dispatch a parsed MSG hash-table from emskin."
   (let ((type (gethash "type" msg "")))
     (cond
      ((string= type "connected")
-      (message "eafvil: connected (version %s)" (gethash "version" msg "?"))
-      (when eaf-eafvil-crosshair
-        (eaf-eafvil--send `((type . "set_crosshair") (enabled . t)))))
+      (message "emskin: connected (version %s)" (gethash "version" msg "?"))
+      (when emskin-crosshair
+        (emskin--send `((type . "set_crosshair") (enabled . t)))))
      ((string= type "error")
-      (message "eafvil error: %s" (gethash "msg" msg "")))
+      (message "emskin error: %s" (gethash "msg" msg "")))
      ((string= type "window_created")
-      (eaf-eafvil--on-window-created (gethash "window_id" msg)
+      (emskin--on-window-created (gethash "window_id" msg)
                                   (gethash "title" msg "")))
      ((string= type "window_destroyed")
-      (eaf-eafvil--on-window-destroyed (gethash "window_id" msg)))
+      (emskin--on-window-destroyed (gethash "window_id" msg)))
      ((string= type "title_changed")
-      (eaf-eafvil--on-title-changed (gethash "window_id" msg)
+      (emskin--on-title-changed (gethash "window_id" msg)
                                  (gethash "title" msg "")))
      ((string= type "focus_view")
-      (eaf-eafvil--on-focus-view (gethash "window_id" msg)
+      (emskin--on-focus-view (gethash "window_id" msg)
                                  (gethash "view_id" msg)))
      ((string= type "activation_token")
-      (when eaf-eafvil--pending-activations
-        (let ((cb (pop eaf-eafvil--pending-activations)))
+      (when emskin--pending-activations
+        (let ((cb (pop emskin--pending-activations)))
           (funcall cb (gethash "token" msg "")))))
      ((string= type "surface_size")
       (let* ((h (gethash "height" msg))
              (offset (max 0 (- h (frame-pixel-height)))))
-        (setq eaf-eafvil--header-offset offset)
-        (message "eafvil: surface=%sx%s bars=%dpx"
+        (setq emskin--header-offset offset)
+        (message "emskin: surface=%sx%s bars=%dpx"
                  (gethash "width" msg) h offset)
         ;; Re-sync all EAF windows now that we have the correct offset.
         (dolist (frame (frame-list))
-          (eaf-eafvil--sync-all frame))))
+          (emskin--sync-all frame))))
      ((string= type "skeleton_clicked")
       (let ((kind (gethash "kind" msg ""))
             (label (gethash "label" msg ""))
@@ -190,63 +190,63 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
             (y (gethash "y" msg 0))
             (w (gethash "w" msg 0))
             (h (gethash "h" msg 0)))
-        (message "eafvil skeleton: %s%s (%d,%d) %dx%d"
+        (message "emskin skeleton: %s%s (%d,%d) %dx%d"
                  kind
                  (if (string-empty-p label) "" (format " [%s]" label))
                  x y w h)))
      (t
-      (message "eafvil: unknown message type %s" type)))))
+      (message "emskin: unknown message type %s" type)))))
 
-(defun eaf-eafvil--on-focus-view (window-id view-id)
+(defun emskin--on-focus-view (window-id view-id)
   "Select the Emacs window that corresponds to WINDOW-ID / VIEW-ID.
 VIEW-ID 0 means the source window; otherwise look up the mirror alist."
-  (let* ((state (gethash window-id eaf-eafvil--mirror-table))
+  (let* ((state (gethash window-id emskin--mirror-table))
          (target (when state
                    (if (= view-id 0)
                        (car state)
                      (cdr (assq view-id (cdr state)))))))
     ;; Fallback for single-window case (no mirror-table entry).
     (unless (and target (window-live-p target))
-      (when-let ((buf (eaf-eafvil--find-buffer window-id)))
+      (when-let ((buf (emskin--find-buffer window-id)))
         (setq target (get-buffer-window buf t))))
     (when (and target (window-live-p target))
       (select-window target))))
 
-(defun eaf-eafvil--on-window-created (window-id title)
+(defun emskin--on-window-created (window-id title)
   "Create/display a buffer for the new EAF app and send initial geometry."
   (let* ((buf-name (format "*eaf: %s*" (if (string-empty-p title) "app" title)))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf
-      (setq-local eaf-eafvil--window-id window-id)
+      (setq-local emskin--window-id window-id)
       (setq-local mode-name "EAF")
       (setq-local buffer-read-only t)
-      (add-hook 'kill-buffer-hook #'eaf-eafvil--kill-buffer-hook nil t)
-      (add-hook 'post-command-hook #'eaf-eafvil--post-command-prefix-done nil t))
+      (add-hook 'kill-buffer-hook #'emskin--kill-buffer-hook nil t)
+      (add-hook 'post-command-hook #'emskin--post-command-prefix-done nil t))
     (display-buffer buf '((display-buffer-use-some-window)
                           (inhibit-same-window . t)))
     (when-let ((win (get-buffer-window buf t)))
-      (eaf-eafvil--report-geometry window-id win))
-    (message "eafvil: EAF app ready (id=%s)" window-id)))
+      (emskin--report-geometry window-id win))
+    (message "emskin: EAF app ready (id=%s)" window-id)))
 
-(defun eaf-eafvil--find-buffer (window-id)
-  "Return the buffer whose `eaf-eafvil--window-id' equals WINDOW-ID, or nil."
+(defun emskin--find-buffer (window-id)
+  "Return the buffer whose `emskin--window-id' equals WINDOW-ID, or nil."
   (seq-find (lambda (buf)
-              (equal (buffer-local-value 'eaf-eafvil--window-id buf) window-id))
+              (equal (buffer-local-value 'emskin--window-id buf) window-id))
             (buffer-list)))
 
-(defun eaf-eafvil--on-window-destroyed (window-id)
+(defun emskin--on-window-destroyed (window-id)
   "Kill the EAF buffer associated with WINDOW-ID."
-  (when-let ((buf (eaf-eafvil--find-buffer window-id)))
+  (when-let ((buf (emskin--find-buffer window-id)))
     ;; Clear window-id first to prevent kill-buffer-hook from sending
     ;; a redundant "close" message back to the compositor.
     (with-current-buffer buf
-      (setq-local eaf-eafvil--window-id nil))
+      (setq-local emskin--window-id nil))
     (kill-buffer buf)
-    (message "eafvil: window %s destroyed" window-id)))
+    (message "emskin: window %s destroyed" window-id)))
 
-(defun eaf-eafvil--on-title-changed (window-id title)
+(defun emskin--on-title-changed (window-id title)
   "Rename the EAF buffer when the app title changes."
-  (when-let ((buf (eaf-eafvil--find-buffer window-id)))
+  (when-let ((buf (emskin--find-buffer window-id)))
     (with-current-buffer buf
       (rename-buffer (format "*eaf: %s*" title) t))))
 
@@ -254,70 +254,70 @@ VIEW-ID 0 means the source window; otherwise look up the mirror alist."
 ;; Lifecycle: kill-buffer → close
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--kill-buffer-hook ()
-  "Notify eafvil to close the app when its Emacs buffer is killed."
-  (when eaf-eafvil--window-id
-    (eaf-eafvil--send `((type . "close")
-                        (window_id . ,eaf-eafvil--window-id)))))
+(defun emskin--kill-buffer-hook ()
+  "Notify emskin to close the app when its Emacs buffer is killed."
+  (when emskin--window-id
+    (emskin--send `((type . "close")
+                        (window_id . ,emskin--window-id)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Prefix key sequence: compositor redirects focus to Emacs for C-x, C-c, M-x.
 ;; After the command completes, tell compositor to restore app focus.
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--post-command-prefix-done ()
+(defun emskin--post-command-prefix-done ()
   "After a command completes in an EAF buffer, signal the compositor.
 The compositor only acts if it previously redirected focus for a prefix key."
-  (when eaf-eafvil--process
-    (eaf-eafvil--send '((type . "prefix_done")))))
+  (when emskin--process
+    (emskin--send '((type . "prefix_done")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil-toggle-crosshair ()
+(defun emskin-toggle-crosshair ()
   "Toggle the crosshair overlay (caliper tool)."
   (interactive)
-  (customize-set-variable 'eaf-eafvil-crosshair (not eaf-eafvil-crosshair)))
+  (customize-set-variable 'emskin-crosshair (not emskin-crosshair)))
 
-(defun eaf-eafvil-connect ()
-  "Connect to the eafvil IPC socket (auto-discovers path)."
+(defun emskin-connect ()
+  "Connect to the emskin IPC socket (auto-discovers path)."
   (interactive)
-  (when eaf-eafvil--process
-    (delete-process eaf-eafvil--process)
-    (setq eaf-eafvil--process nil))
-  (setq eaf-eafvil--read-buf "")
-  (let ((path (eaf-eafvil--ipc-path)))
+  (when emskin--process
+    (delete-process emskin--process)
+    (setq emskin--process nil))
+  (setq emskin--read-buf "")
+  (let ((path (emskin--ipc-path)))
     (condition-case err
         (progn
-          (setq eaf-eafvil--process
+          (setq emskin--process
                 (make-network-process
-                 :name "eaf-eafvil-ipc"
+                 :name "emskin-ipc"
                  :family 'local
                  :service path
                  :coding 'binary
-                 :filter #'eaf-eafvil--filter
-                 :sentinel #'eaf-eafvil--sentinel
+                 :filter #'emskin--filter
+                 :sentinel #'emskin--sentinel
                  :nowait nil))
-          (message "eafvil: connecting to %s" path))
+          (message "emskin: connecting to %s" path))
       (error
-       (message "eafvil: failed to connect to %s: %s" path err)))))
+       (message "emskin: failed to connect to %s: %s" path err)))))
 
-(defun eaf-eafvil--send (msg)
-  "Send MSG (alist) to eafvil over IPC."
-  (when eaf-eafvil--process
-    (process-send-string eaf-eafvil--process (eaf-eafvil--encode-message msg))))
+(defun emskin--send (msg)
+  "Send MSG (alist) to emskin over IPC."
+  (when emskin--process
+    (process-send-string emskin--process (emskin--encode-message msg))))
 
 ;; ---------------------------------------------------------------------------
 ;; Geometry reporting
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--frame-header-offset (&optional _frame)
+(defun emskin--frame-header-offset (&optional _frame)
   "Pixel height of external GTK bars (menu-bar + tool-bar).
 Computed once when the compositor reports the surface size."
-  (or eaf-eafvil--header-offset 0))
+  (or emskin--header-offset 0))
 
-(defun eaf-eafvil--window-geometry (window)
+(defun emskin--window-geometry (window)
   "Return (x y w h) in pixels for Emacs WINDOW.
 Coordinates are relative to the top-left of the Wayland surface.
 Covers the full window width (including fringes) but excludes the mode-line."
@@ -325,13 +325,13 @@ Covers the full window width (including fringes) but excludes the mode-line."
          (body-edges (window-body-pixel-edges window))
          (x (nth 0 edges))
          (raw-y (nth 1 edges))
-         (y (+ raw-y (eaf-eafvil--frame-header-offset (window-frame window))))
+         (y (+ raw-y (emskin--frame-header-offset (window-frame window))))
          (w (- (nth 2 edges) x))
          ;; body-bottom = top of mode-line; stop there so mode-line stays visible.
          (h (- (nth 3 body-edges) raw-y)))
     (list x y w h)))
 
-(defun eaf-eafvil-debug-geometry ()
+(defun emskin-debug-geometry ()
   "Print geometry debug info to *Messages*."
   (interactive)
   (let* ((frame (selected-frame))
@@ -346,9 +346,9 @@ Covers the full window width (including fringes) but excludes the mode-line."
          (pixel-h (frame-pixel-height frame))
          (inner-h (frame-inner-height frame))
          (mb-lines (frame-parameter frame 'menu-bar-lines))
-         (offset (eaf-eafvil--frame-header-offset frame))
-         (final (eaf-eafvil--window-geometry win)))
-    (message (concat "eafvil-debug: "
+         (offset (emskin--frame-header-offset frame))
+         (final (emskin--window-geometry win)))
+    (message (concat "emskin-debug: "
                      "mb: h=%d ext=%s lines=%s | "
                      "tb: h=%d ext=%s | "
                      "outer-h=%s pixel-h=%d inner-h=%d | "
@@ -359,31 +359,31 @@ Covers the full window width (including fringes) but excludes the mode-line."
              outer-h pixel-h inner-h
              root-edges offset final)))
 
-(defvar-local eaf-eafvil--last-geometry nil
+(defvar-local emskin--last-geometry nil
   "Last geometry sent for this buffer's EAF window, to skip no-op updates.")
 
-(defun eaf-eafvil--report-geometry (window-id window)
+(defun emskin--report-geometry (window-id window)
   "Send set_geometry for WINDOW-ID, only when geometry actually changed."
-  (let ((geo (eaf-eafvil--window-geometry window)))
-    (unless (equal geo (buffer-local-value 'eaf-eafvil--last-geometry
+  (let ((geo (emskin--window-geometry window)))
+    (unless (equal geo (buffer-local-value 'emskin--last-geometry
                                            (window-buffer window)))
       (with-current-buffer (window-buffer window)
-        (setq-local eaf-eafvil--last-geometry geo))
-      (eaf-eafvil--send `((type . "set_geometry")
+        (setq-local emskin--last-geometry geo))
+      (emskin--send `((type . "set_geometry")
                       (window_id . ,window-id)
                       (x . ,(nth 0 geo))
                       (y . ,(nth 1 geo))
                       (w . ,(nth 2 geo))
                       (h . ,(nth 3 geo)))))))
 
-(defun eaf-eafvil--alloc-view-id ()
+(defun emskin--alloc-view-id ()
   "Allocate a unique mirror view ID."
-  (cl-incf eaf-eafvil--next-view-id))
+  (cl-incf emskin--next-view-id))
 
-(defun eaf-eafvil--send-mirror-geometry (wid view-id win msg-type)
+(defun emskin--send-mirror-geometry (wid view-id win msg-type)
   "Send mirror geometry IPC for WID/VIEW-ID at Emacs WIN position."
-  (let ((geo (eaf-eafvil--window-geometry win)))
-    (eaf-eafvil--send `((type . ,msg-type)
+  (let ((geo (emskin--window-geometry win)))
+    (emskin--send `((type . ,msg-type)
                         (window_id . ,wid)
                         (view_id . ,view-id)
                         (x . ,(nth 0 geo))
@@ -391,40 +391,40 @@ Covers the full window width (including fringes) but excludes the mode-line."
                         (w . ,(nth 2 geo))
                         (h . ,(nth 3 geo))))))
 
-(defun eaf-eafvil--sync-all (_frame)
+(defun emskin--sync-all (_frame)
   "Sync visibility, geometry, and mirrors for all EAF buffers."
   ;; Pass 1: collect all Emacs windows showing each EAF buffer.
   ;; Key: window-id, Value: list of Emacs windows (in order found).
   (let ((wid-wins (make-hash-table :test 'eql)))
     (dolist (fr (frame-list))
       (dolist (win (window-list fr 'no-minibuf))
-        (when-let ((wid (buffer-local-value 'eaf-eafvil--window-id
+        (when-let ((wid (buffer-local-value 'emskin--window-id
                                             (window-buffer win))))
           (puthash wid (append (gethash wid wid-wins) (list win)) wid-wins))))
     ;; Pass 2: for each EAF buffer, sync source + mirrors.
     (dolist (buf (buffer-list))
-      (when-let ((wid (buffer-local-value 'eaf-eafvil--window-id buf)))
+      (when-let ((wid (buffer-local-value 'emskin--window-id buf)))
         (let* ((wins (gethash wid wid-wins))
                (now-visible (and wins t))
-               (was-visible (buffer-local-value 'eaf-eafvil--visible buf))
-               (prev-state (gethash wid eaf-eafvil--mirror-table))
+               (was-visible (buffer-local-value 'emskin--visible buf))
+               (prev-state (gethash wid emskin--mirror-table))
                (prev-source (car prev-state))
                (prev-mirrors (cdr prev-state))) ; ((view-id . emacs-win) ...)
           ;; Visibility change.
           (unless (eq now-visible was-visible)
             (with-current-buffer buf
-              (setq-local eaf-eafvil--visible now-visible))
-            (eaf-eafvil--send `((type . "set_visibility")
+              (setq-local emskin--visible now-visible))
+            (emskin--send `((type . "set_visibility")
                                 (window_id . ,wid)
                                 (visible . ,(if now-visible t :json-false)))))
           (if (not wins)
               ;; No windows showing this buffer — clean up mirrors.
               (progn
                 (dolist (m prev-mirrors)
-                  (eaf-eafvil--send `((type . "remove_mirror")
+                  (emskin--send `((type . "remove_mirror")
                                       (window_id . ,wid)
                                       (view_id . ,(car m)))))
-                (remhash wid eaf-eafvil--mirror-table))
+                (remhash wid emskin--mirror-table))
             ;; Determine source window: keep prev-source if still showing,
             ;; otherwise use first window in the list.
             (let* ((source-win (if (and prev-source (memq prev-source wins))
@@ -435,12 +435,12 @@ Covers the full window width (including fringes) but excludes the mode-line."
               ;; Source changed — remove all old mirrors and rebuild.
               (when (and prev-source (not (eq source-win prev-source)))
                 (dolist (m prev-mirrors)
-                  (eaf-eafvil--send `((type . "remove_mirror")
+                  (emskin--send `((type . "remove_mirror")
                                       (window_id . ,wid)
                                       (view_id . ,(car m)))))
                 (setq prev-mirrors nil))
               ;; Sync source geometry.
-              (eaf-eafvil--report-geometry wid source-win)
+              (emskin--report-geometry wid source-win)
               ;; Reconcile mirrors: reuse existing view-ids where possible.
               (let ((old-by-win (make-hash-table :test 'eq)))
                 ;; Index old mirrors by Emacs window.
@@ -449,34 +449,34 @@ Covers the full window width (including fringes) but excludes the mode-line."
                 ;; For each mirror window, reuse or create view-id.
                 (dolist (mw mirror-wins)
                   (let ((vid (or (gethash mw old-by-win)
-                                 (eaf-eafvil--alloc-view-id))))
+                                 (emskin--alloc-view-id))))
                     (push (cons vid mw) new-mirrors)
                     (if (gethash mw old-by-win)
                         ;; Existing mirror — update geometry.
-                        (eaf-eafvil--send-mirror-geometry
+                        (emskin--send-mirror-geometry
                          wid vid mw "update_mirror_geometry")
                       ;; New mirror — add it.
-                      (eaf-eafvil--send-mirror-geometry
+                      (emskin--send-mirror-geometry
                        wid vid mw "add_mirror"))
                     (remhash mw old-by-win)))
                 ;; Remove mirrors that are no longer displayed.
                 (maphash (lambda (_win vid)
-                           (eaf-eafvil--send `((type . "remove_mirror")
+                           (emskin--send `((type . "remove_mirror")
                                                (window_id . ,wid)
                                                (view_id . ,vid))))
                          old-by-win))
               ;; Store current state.
               (puthash wid (cons source-win (nreverse new-mirrors))
-                       eaf-eafvil--mirror-table))))))))
+                       emskin--mirror-table))))))))
 
-(add-hook 'window-size-change-functions #'eaf-eafvil--sync-all)
-(add-hook 'window-buffer-change-functions #'eaf-eafvil--sync-all)
+(add-hook 'window-size-change-functions #'emskin--sync-all)
+(add-hook 'window-buffer-change-functions #'emskin--sync-all)
 
 ;; ---------------------------------------------------------------------------
 ;; Skeleton overlay (frame layout inspector)
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil--skeleton-rect (kind label x y w h selected)
+(defun emskin--skeleton-rect (kind label x y w h selected)
   "Build one skeleton rect alist."
   `((kind . ,kind)
     (label . ,(or label ""))
@@ -486,14 +486,14 @@ Covers the full window width (including fringes) but excludes the mode-line."
     (h . ,h)
     (selected . ,(if selected t :json-false))))
 
-(defun eaf-eafvil--collect-skeleton-rects ()
+(defun emskin--collect-skeleton-rects ()
   "Return a list of rect alists describing the selected frame's layout.
 Coordinates are in pixels relative to the top-left of the Wayland surface,
-matching the convention used by `eaf-eafvil--window-geometry'."
+matching the convention used by `emskin--window-geometry'."
   (let* ((frame (selected-frame))
          (geom (frame-geometry frame))
          (selected-win (selected-window))
-         (off (eaf-eafvil--frame-header-offset frame))
+         (off (emskin--frame-header-offset frame))
          ;; On pgtk, `outer-size' in `frame-geometry' does NOT include the
          ;; external GTK menu-bar / tool-bar heights (same architectural
          ;; limitation as `menu-bar-size'). Compute the true surface height
@@ -514,25 +514,25 @@ matching the convention used by `eaf-eafvil--window-geometry'."
                      (t raw-tb-h)))
          (rects nil))
     ;; Frame outer rectangle.
-    (push (eaf-eafvil--skeleton-rect "frame" "" 0 0 outer-w outer-h nil) rects)
+    (push (emskin--skeleton-rect "frame" "" 0 0 outer-w outer-h nil) rects)
     ;; External chrome aggregate (menu-bar + tool-bar). Kept as a bounding
     ;; rect even when individual bars are drawn on top, so the label shows
     ;; the total `off` value for debugging.
     (when (> off 0)
-      (push (eaf-eafvil--skeleton-rect
+      (push (emskin--skeleton-rect
              "chrome" (format "off=%d" off) 0 0 outer-w off nil)
             rects))
     ;; Menu bar (top of the external chrome).
     (when (> mb-h 0)
-      (push (eaf-eafvil--skeleton-rect "menu-bar" "" 0 0 outer-w mb-h nil)
+      (push (emskin--skeleton-rect "menu-bar" "" 0 0 outer-w mb-h nil)
             rects))
     ;; Tool bar (below the menu bar).
     (when (> tb-h 0)
-      (push (eaf-eafvil--skeleton-rect "tool-bar" "" 0 mb-h outer-w tb-h nil)
+      (push (emskin--skeleton-rect "tool-bar" "" 0 mb-h outer-w tb-h nil)
             rects))
     ;; Tab bar (internal, sits just below the external chrome).
     (when (> tab-h 0)
-      (push (eaf-eafvil--skeleton-rect "tab-bar" "" 0 off outer-w tab-h nil)
+      (push (emskin--skeleton-rect "tab-bar" "" 0 off outer-w tab-h nil)
             rects))
     ;; Each live window: full rect + header-line strip + mode-line strip.
     (dolist (win (window-list frame 'no-minibuf))
@@ -550,14 +550,14 @@ matching the convention used by `eaf-eafvil--window-geometry'."
              (h (- raw-b raw-y))
              (sel (eq win selected-win))
              (buf-title (buffer-name (window-buffer win))))
-        (push (eaf-eafvil--skeleton-rect "window" buf-title x y w h sel)
+        (push (emskin--skeleton-rect "window" buf-title x y w h sel)
               rects)
         (when (> body-top raw-y)
-          (push (eaf-eafvil--skeleton-rect
+          (push (emskin--skeleton-rect
                  "header-line" "" x y w (- body-top raw-y) nil)
                 rects))
         (when (> raw-b body-bot)
-          (push (eaf-eafvil--skeleton-rect
+          (push (emskin--skeleton-rect
                  "mode-line" "" x (+ body-bot off) w (- raw-b body-bot) nil)
                 rects))))
     ;; Echo area / minibuffer window.
@@ -569,71 +569,71 @@ matching the convention used by `eaf-eafvil--window-geometry'."
                (w (- (nth 2 edges) (nth 0 edges)))
                (h (- (nth 3 edges) (nth 1 edges))))
           (when (and (> w 0) (> h 0))
-            (push (eaf-eafvil--skeleton-rect "echo-area" "" x y w h nil)
+            (push (emskin--skeleton-rect "echo-area" "" x y w h nil)
                   rects)))))
     (nreverse rects)))
 
-(defvar eaf-eafvil--last-skeleton-rects 'unset
+(defvar emskin--last-skeleton-rects 'unset
   "Last rect list sent via set_skeleton IPC, used for change detection.
 Auto-refresh hooks fire on every window-command, so without this guard
 we'd re-send an identical payload on every keystroke.")
 
-(defun eaf-eafvil--push-skeleton (enabled)
+(defun emskin--push-skeleton (enabled)
   "Send the current skeleton state (bool ENABLED) to the compositor.
 Skips IPC when the rect list is identical to the last one sent."
-  (when eaf-eafvil--process
+  (when emskin--process
     (if (not enabled)
-        (unless (null eaf-eafvil--last-skeleton-rects)
-          (setq eaf-eafvil--last-skeleton-rects nil)
-          (eaf-eafvil--send '((type . "set_skeleton")
+        (unless (null emskin--last-skeleton-rects)
+          (setq emskin--last-skeleton-rects nil)
+          (emskin--send '((type . "set_skeleton")
                               (enabled . :json-false)
                               (rects . []))))
-      (let ((rects (eaf-eafvil--collect-skeleton-rects)))
-        (unless (equal rects eaf-eafvil--last-skeleton-rects)
-          (setq eaf-eafvil--last-skeleton-rects rects)
-          (eaf-eafvil--send
+      (let ((rects (emskin--collect-skeleton-rects)))
+        (unless (equal rects emskin--last-skeleton-rects)
+          (setq emskin--last-skeleton-rects rects)
+          (emskin--send
            `((type . "set_skeleton")
              (enabled . t)
              (rects . ,(vconcat rects)))))))))
 
-(defun eaf-eafvil-toggle-skeleton ()
+(defun emskin-toggle-skeleton ()
   "Toggle the skeleton overlay (frame layout inspector)."
   (interactive)
-  (customize-set-variable 'eaf-eafvil-skeleton (not eaf-eafvil-skeleton)))
+  (customize-set-variable 'emskin-skeleton (not emskin-skeleton)))
 
-(defun eaf-eafvil-refresh-skeleton ()
+(defun emskin-refresh-skeleton ()
   "Re-send the current frame layout as the skeleton overlay."
   (interactive)
-  (when eaf-eafvil-skeleton
-    (eaf-eafvil--push-skeleton t)))
+  (when emskin-skeleton
+    (emskin--push-skeleton t)))
 
-(defun eaf-eafvil--skeleton-auto-refresh (&optional _frame)
+(defun emskin--skeleton-auto-refresh (&optional _frame)
   "Hook: refresh skeleton when layout changes, only if the overlay is enabled."
-  (when eaf-eafvil-skeleton
-    (eaf-eafvil--push-skeleton t)))
+  (when emskin-skeleton
+    (emskin--push-skeleton t)))
 
-(add-hook 'window-size-change-functions #'eaf-eafvil--skeleton-auto-refresh)
-(add-hook 'window-buffer-change-functions #'eaf-eafvil--skeleton-auto-refresh)
+(add-hook 'window-size-change-functions #'emskin--skeleton-auto-refresh)
+(add-hook 'window-buffer-change-functions #'emskin--skeleton-auto-refresh)
 
-(defun eaf-eafvil--sync-focus (&optional _frame)
+(defun emskin--sync-focus (&optional _frame)
   "Tell the compositor which surface should have keyboard focus.
 When the selected window shows an EAF buffer, focus the app;
 otherwise focus Emacs.  Skips IPC when focus hasn't changed."
-  (when eaf-eafvil--process
-    (let ((wid (buffer-local-value 'eaf-eafvil--window-id
+  (when emskin--process
+    (let ((wid (buffer-local-value 'emskin--window-id
                                    (window-buffer (selected-window)))))
-      (unless (eq wid eaf-eafvil--last-focused-wid)
-        (setq eaf-eafvil--last-focused-wid wid)
-        (eaf-eafvil--send `((type . "set_focus")
+      (unless (eq wid emskin--last-focused-wid)
+        (setq emskin--last-focused-wid wid)
+        (emskin--send `((type . "set_focus")
                             (window_id . ,(or wid :json-null))))))))
 
-(add-hook 'window-selection-change-functions #'eaf-eafvil--sync-focus)
+(add-hook 'window-selection-change-functions #'emskin--sync-focus)
 
 ;; ---------------------------------------------------------------------------
 ;; Launch an EAF application
 ;; ---------------------------------------------------------------------------
 
-(defcustom eaf-eafvil-demo-dir
+(defcustom emskin-demo-dir
   (expand-file-name
    "../demo"
    (file-name-directory
@@ -641,62 +641,62 @@ otherwise focus Emacs.  Skips IPC when focus hasn't changed."
         "~/.emacs.d/site-lisp/emacs-application-framework/mvp/elisp/")))
   "Directory containing EAF demo/app Python scripts."
   :type 'directory
-  :group 'eaf-eafvil)
+  :group 'emskin)
 
-(defun eaf-eafvil--process-env-with-token (token)
+(defun emskin--process-env-with-token (token)
   "Build process-environment with XDG_ACTIVATION_TOKEN."
   (if token
       (cons (format "XDG_ACTIVATION_TOKEN=%s" token) process-environment)
     process-environment))
 
-(defun eaf-eafvil--launch-with-token (callback)
+(defun emskin--launch-with-token (callback)
   "Request an activation token, then call CALLBACK with the token string.
 CALLBACK receives the token string (or nil if unavailable)."
-  (if (not eaf-eafvil--process)
+  (if (not emskin--process)
       (funcall callback nil)
-    (setq eaf-eafvil--pending-activations
-          (append eaf-eafvil--pending-activations (list callback)))
-    (eaf-eafvil--send '((type . "request_activation_token")))))
+    (setq emskin--pending-activations
+          (append emskin--pending-activations (list callback)))
+    (emskin--send '((type . "request_activation_token")))))
 
-(defun eaf-open-app (app-name)
-  "Launch EAF application APP-NAME (Python script in `eaf-eafvil-demo-dir')."
+(defun emskin-open-app (app-name)
+  "Launch EAF application APP-NAME (Python script in `emskin-demo-dir')."
   (interactive "sApp name: ")
-  (let ((script (expand-file-name (format "%s.py" app-name) eaf-eafvil-demo-dir)))
+  (let ((script (expand-file-name (format "%s.py" app-name) emskin-demo-dir)))
     (unless (file-exists-p script)
       (error "EAF script not found: %s" script))
-    (eaf-eafvil--launch-with-token
+    (emskin--launch-with-token
      (lambda (token)
-       (let ((process-environment (eaf-eafvil--process-env-with-token token)))
+       (let ((process-environment (emskin--process-env-with-token token)))
          (start-process (format "eaf-%s" app-name) nil "python3" script)
-         (message "eafvil: launched %s" app-name))))))
+         (message "emskin: launched %s" app-name))))))
 
-(defun eaf-open-native-app (command)
-  "Launch a native Wayland application inside eafvil.
+(defun emskin-open-native-app (command)
+  "Launch a native Wayland application inside emskin.
 COMMAND is a shell command string, e.g. \"foot\" or \"firefox\"."
   (interactive "sCommand: ")
   (let ((args (split-string-and-unquote command)))
-    (eaf-eafvil--launch-with-token
+    (emskin--launch-with-token
      (lambda (token)
-       (let ((process-environment (eaf-eafvil--process-env-with-token token)))
+       (let ((process-environment (emskin--process-env-with-token token)))
          (apply #'start-process
-                (format "eafvil-%s" (car args))
+                (format "emskin-%s" (car args))
                 nil args)
-         (message "eafvil: launched native app: %s" command))))))
+         (message "emskin: launched native app: %s" command))))))
 
 ;; ---------------------------------------------------------------------------
-;; Auto-connect when running inside eafvil
+;; Auto-connect when running inside emskin
 ;; ---------------------------------------------------------------------------
 
-(defun eaf-eafvil-maybe-auto-connect ()
-  "Connect to eafvil IPC if we appear to be running inside eafvil.
-Checks for the eaf-eafvil-specific socket file derived from our parent PID."
+(defun emskin-maybe-auto-connect ()
+  "Connect to emskin IPC if we appear to be running inside emskin.
+Checks for the emskin-specific socket file derived from our parent PID."
   (when (featurep 'pgtk)
-    (let ((path (eaf-eafvil--ipc-path)))
+    (let ((path (emskin--ipc-path)))
       (when (file-exists-p path)
-        (run-with-timer 0.5 nil #'eaf-eafvil-connect)))))
+        (run-with-timer 0.5 nil #'emskin-connect)))))
 
 ;; Hook into Emacs startup.
-(add-hook 'emacs-startup-hook #'eaf-eafvil-maybe-auto-connect)
+(add-hook 'emacs-startup-hook #'emskin-maybe-auto-connect)
 
-(provide 'eaf-eafvil)
-;;; eaf-eafvil.el ends here
+(provide 'emskin)
+;;; emskin.el ends here

@@ -1,4 +1,4 @@
-use crate::{state::ClientState, EafvilState};
+use crate::{state::ClientState, EmskinState};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
@@ -19,7 +19,7 @@ use smithay::{
 
 use super::xdg_shell;
 
-impl CompositorHandler for EafvilState {
+impl CompositorHandler for EmskinState {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
@@ -69,25 +69,25 @@ impl CompositorHandler for EafvilState {
     }
 }
 
-impl BufferHandler for EafvilState {
+impl BufferHandler for EmskinState {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
 
-impl ShmHandler for EafvilState {
+impl ShmHandler for EmskinState {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
 }
 
-delegate_compositor!(EafvilState);
-delegate_shm!(EafvilState);
+delegate_compositor!(EmskinState);
+delegate_shm!(EmskinState);
 
-smithay::delegate_viewporter!(EafvilState);
-impl smithay::wayland::fractional_scale::FractionalScaleHandler for EafvilState {
+smithay::delegate_viewporter!(EmskinState);
+impl smithay::wayland::fractional_scale::FractionalScaleHandler for EmskinState {
     fn new_fractional_scale(
         &mut self,
         _surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) {
     }
 }
-smithay::delegate_fractional_scale!(EafvilState);
+smithay::delegate_fractional_scale!(EmskinState);

@@ -10,9 +10,9 @@ use smithay::{
     utils::SERIAL_COUNTER,
 };
 
-use crate::state::EafvilState;
+use crate::state::EmskinState;
 
-impl EafvilState {
+impl EmskinState {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         match event {
             InputEvent::Keyboard { event, .. } => {

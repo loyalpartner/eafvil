@@ -13,13 +13,13 @@ mod winit;
 use clap::Parser;
 use include_dir::{include_dir, Dir};
 use smithay::reexports::wayland_server::Display;
-pub use state::EafvilState;
+pub use state::EmskinState;
 
 static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../elisp");
 
 /// Nested Wayland compositor for Emacs Application Framework.
 #[derive(Parser, Debug)]
-#[command(name = "eafvil")]
+#[command(name = "emskin")]
 struct Cli {
     /// Do not spawn a child process; wait for an external connection.
     #[arg(long)]
@@ -33,7 +33,7 @@ struct Cli {
     #[arg(long = "arg", num_args = 1)]
     command_args: Vec<String>,
 
-    /// Explicit IPC socket path (default: $XDG_RUNTIME_DIR/eafvil-<pid>.ipc).
+    /// Explicit IPC socket path (default: $XDG_RUNTIME_DIR/emskin-<pid>.ipc).
     #[arg(long)]
     ipc_path: Option<std::path::PathBuf>,
 
@@ -62,10 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
     let cli = Cli::parse();
 
-    let mut event_loop: smithay::reexports::calloop::EventLoop<'static, EafvilState> =
+    let mut event_loop: smithay::reexports::calloop::EventLoop<'static, EmskinState> =
         smithay::reexports::calloop::EventLoop::try_new()?;
 
-    let display: Display<EafvilState> = Display::new()?;
+    let display: Display<EmskinState> = Display::new()?;
 
     let ipc_path = cli.ipc_path.clone().unwrap_or_else(default_ipc_path);
     tracing::info!("IPC socket path: {}", ipc_path.display());
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ipc = crate::ipc::IpcServer::bind(ipc_path)?;
     let loop_handle = event_loop.handle();
-    let mut state = EafvilState::new(&mut event_loop, loop_handle, display, ipc, xkb_config)?;
+    let mut state = EmskinState::new(&mut event_loop, loop_handle, display, ipc, xkb_config)?;
 
     // Initialize clipboard synchronization with host compositor.
     // Try Wayland data_control first; fall back to X11 selection protocol.
@@ -183,8 +183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn register_ipc_source(
-    event_loop: &mut smithay::reexports::calloop::EventLoop<EafvilState>,
-    state: &EafvilState,
+    event_loop: &mut smithay::reexports::calloop::EventLoop<EmskinState>,
+    state: &EmskinState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
     use std::os::unix::io::FromRawFd;
@@ -216,7 +216,7 @@ fn spawn_child(
     args: &[String],
     x_display: u32,
     standalone: bool,
-    state: &mut EafvilState,
+    state: &mut EmskinState,
 ) {
     let Some(socket_name) = state.socket_name.to_str() else {
         tracing::error!("Wayland socket name is not valid UTF-8, cannot spawn child");
@@ -230,7 +230,7 @@ fn spawn_child(
             full_args.push("--directory".to_string());
             full_args.push(elisp_dir.to_string_lossy().into_owned());
             full_args.push("-l".to_string());
-            full_args.push("eaf-eafvil".to_string());
+            full_args.push("emskin".to_string());
             state.elisp_dir = Some(elisp_dir);
         }
     }
@@ -261,10 +261,10 @@ fn runtime_dir() -> String {
     std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string())
 }
 
-/// Extract embedded elisp files to `$XDG_RUNTIME_DIR/eafvil-<pid>/elisp/`.
+/// Extract embedded elisp files to `$XDG_RUNTIME_DIR/emskin-<pid>/elisp/`.
 fn extract_embedded_elisp() -> Option<std::path::PathBuf> {
     let dir = std::path::PathBuf::from(format!(
-        "{}/eafvil-{}/elisp",
+        "{}/emskin-{}/elisp",
         runtime_dir(),
         std::process::id()
     ));
@@ -285,10 +285,10 @@ fn extract_embedded_elisp() -> Option<std::path::PathBuf> {
 
 fn default_ipc_path() -> std::path::PathBuf {
     let pid = std::process::id();
-    std::path::PathBuf::from(format!("{}/eafvil-{pid}.ipc", runtime_dir()))
+    std::path::PathBuf::from(format!("{}/emskin-{pid}.ipc", runtime_dir()))
 }
 
-fn handle_ipc_message(state: &mut EafvilState, msg: ipc::IncomingMessage) {
+fn handle_ipc_message(state: &mut EmskinState, msg: ipc::IncomingMessage) {
     use ipc::IncomingMessage;
     match msg {
         IncomingMessage::SetGeometry {
@@ -357,7 +357,7 @@ fn handle_ipc_message(state: &mut EafvilState, msg: ipc::IncomingMessage) {
     }
 }
 
-fn ipc_set_geometry(state: &mut EafvilState, window_id: u64, x: i32, y: i32, w: i32, h: i32) {
+fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, x: i32, y: i32, w: i32, h: i32) {
     tracing::debug!("IPC set_geometry window={window_id} ({x},{y},{w},{h})");
     if w <= 0 || h <= 0 {
         tracing::warn!("IPC set_geometry: invalid size ({w}x{h}), ignoring");
@@ -395,7 +395,7 @@ fn ipc_set_geometry(state: &mut EafvilState, window_id: u64, x: i32, y: i32, w: 
     }
 }
 
-fn ipc_close(state: &mut EafvilState, window_id: u64) {
+fn ipc_close(state: &mut EmskinState, window_id: u64) {
     tracing::debug!("IPC close window={window_id}");
     if let Some(app) = state.apps.get_mut(window_id) {
         if let Some(toplevel) = app.window.toplevel() {
@@ -408,7 +408,7 @@ fn ipc_close(state: &mut EafvilState, window_id: u64) {
     }
 }
 
-fn ipc_set_visibility(state: &mut EafvilState, window_id: u64, visible: bool) {
+fn ipc_set_visibility(state: &mut EmskinState, window_id: u64, visible: bool) {
     tracing::debug!("IPC set_visibility window={window_id} visible={visible}");
     let Some(app) = state.apps.get_mut(window_id) else {
         return;
@@ -423,7 +423,7 @@ fn ipc_set_visibility(state: &mut EafvilState, window_id: u64, visible: bool) {
     }
 }
 
-fn ipc_prefix_done(state: &mut EafvilState) {
+fn ipc_prefix_done(state: &mut EmskinState) {
     let Some(saved) = state.prefix_saved_focus.take() else {
         return;
     };
@@ -436,7 +436,7 @@ fn ipc_prefix_done(state: &mut EafvilState) {
 }
 
 fn ipc_add_mirror(
-    state: &mut EafvilState,
+    state: &mut EmskinState,
     window_id: u64,
     view_id: u64,
     x: i32,
@@ -465,7 +465,7 @@ fn ipc_add_mirror(
 }
 
 fn ipc_update_mirror_geometry(
-    state: &mut EafvilState,
+    state: &mut EmskinState,
     window_id: u64,
     view_id: u64,
     x: i32,
@@ -489,14 +489,14 @@ fn ipc_update_mirror_geometry(
     }
 }
 
-fn ipc_remove_mirror(state: &mut EafvilState, window_id: u64, view_id: u64) {
+fn ipc_remove_mirror(state: &mut EmskinState, window_id: u64, view_id: u64) {
     tracing::debug!("IPC remove_mirror window={window_id} view={view_id}");
     if let Some(app) = state.apps.get_mut(window_id) {
         app.mirrors.remove(&view_id);
     }
 }
 
-fn ipc_set_focus(state: &mut EafvilState, window_id: Option<u64>) {
+fn ipc_set_focus(state: &mut EmskinState, window_id: Option<u64>) {
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
@@ -514,7 +514,7 @@ fn ipc_set_focus(state: &mut EafvilState, window_id: Option<u64>) {
     keyboard.set_focus(state, target, serial);
 }
 
-fn ipc_request_activation_token(state: &mut EafvilState) {
+fn ipc_request_activation_token(state: &mut EmskinState) {
     let (token, _data) = state.xdg_activation_state.create_external_token(None);
     let token_str = token.to_string();
     tracing::debug!("IPC request_activation_token: {token_str}");
@@ -523,7 +523,7 @@ fn ipc_request_activation_token(state: &mut EafvilState) {
         .send(ipc::OutgoingMessage::ActivationToken { token: token_str });
 }
 
-fn ipc_promote_mirror(state: &mut EafvilState, window_id: u64, view_id: u64) {
+fn ipc_promote_mirror(state: &mut EmskinState, window_id: u64, view_id: u64) {
     tracing::debug!("IPC promote_mirror window={window_id} view={view_id}");
     let Some(app) = state.apps.get_mut(window_id) else {
         return;
@@ -539,8 +539,8 @@ fn ipc_promote_mirror(state: &mut EafvilState, window_id: u64, view_id: u64) {
 }
 
 fn start_xwayland(
-    handle: smithay::reexports::calloop::LoopHandle<'static, EafvilState>,
-    state: &mut EafvilState,
+    handle: smithay::reexports::calloop::LoopHandle<'static, EmskinState>,
+    state: &mut EmskinState,
 ) {
     use smithay::xwayland::{XWayland, XWaylandEvent};
 
@@ -603,7 +603,7 @@ fn start_xwayland(
 }
 
 fn register_clipboard_source(
-    event_loop: &mut smithay::reexports::calloop::EventLoop<EafvilState>,
+    event_loop: &mut smithay::reexports::calloop::EventLoop<EmskinState>,
     clipboard: &clipboard::HostClipboard,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
@@ -632,7 +632,7 @@ fn register_clipboard_source(
     Ok(())
 }
 
-fn handle_clipboard_event(state: &mut EafvilState, event: clipboard::ClipboardEvent) {
+fn handle_clipboard_event(state: &mut EmskinState, event: clipboard::ClipboardEvent) {
     use clipboard::ClipboardEvent;
 
     match event {
@@ -666,7 +666,7 @@ fn handle_clipboard_event(state: &mut EafvilState, event: clipboard::ClipboardEv
 }
 
 fn inject_host_selection(
-    state: &mut EafvilState,
+    state: &mut EmskinState,
     target: smithay::wayland::selection::SelectionTarget,
     mime_types: Vec<String>,
 ) {
@@ -701,7 +701,7 @@ fn inject_host_selection(
 
 /// Register a pipe read_fd with calloop for event-driven reading.
 /// Returns `false` if registration fails (caller should clean up).
-fn register_outgoing_pipe(state: &mut EafvilState, id: u64, read_fd: std::os::fd::OwnedFd) -> bool {
+fn register_outgoing_pipe(state: &mut EmskinState, id: u64, read_fd: std::os::fd::OwnedFd) -> bool {
     use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
     use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 
@@ -742,7 +742,7 @@ fn register_outgoing_pipe(state: &mut EafvilState, id: u64, read_fd: std::os::fd
 }
 
 fn forward_client_selection(
-    state: &mut EafvilState,
+    state: &mut EmskinState,
     target: smithay::wayland::selection::SelectionTarget,
     mime_type: String,
     fd: std::os::fd::OwnedFd,

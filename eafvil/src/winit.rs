@@ -21,15 +21,15 @@ use smithay::{
     utils::{Logical, Physical, Rectangle, Size, Transform, SERIAL_COUNTER},
 };
 
-use crate::EafvilState;
+use crate::EmskinState;
 
 /// Blanket trait bundling renderer constraints for the `render_elements!` macro
 /// (which cannot parse associated-type bounds like `Renderer<TextureId = GlesTexture>`).
-trait EafvilRenderer: ImportMem + Renderer<TextureId = GlesTexture> {}
-impl<R: ImportMem + Renderer<TextureId = GlesTexture>> EafvilRenderer for R {}
+trait EmskinRenderer: ImportMem + Renderer<TextureId = GlesTexture> {}
+impl<R: ImportMem + Renderer<TextureId = GlesTexture>> EmskinRenderer for R {}
 
 render_elements! {
-    pub CustomElement<R> where R: EafvilRenderer;
+    pub CustomElement<R> where R: EmskinRenderer;
     Mirror=TextureRenderElement<GlesTexture>,
     Solid=SolidColorRenderElement,
     Label=MemoryRenderBufferRenderElement<R>,
@@ -44,7 +44,7 @@ fn make_mode(size: Size<i32, Physical>) -> Mode {
     }
 }
 
-fn apply_pending_state(state: &mut EafvilState, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
+fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
     if let Some(title) = state.emacs_title.take() {
         backend.window().set_title(&title);
     }
@@ -67,7 +67,7 @@ fn apply_pending_state(state: &mut EafvilState, backend: &mut WinitGraphicsBacke
 /// Build TextureRenderElements for all mirrors by reading each surface layer's
 /// (toplevel + popups) committed texture — no copy, no snapshot.
 fn build_mirror_elements(
-    state: &mut EafvilState,
+    state: &mut EmskinState,
     renderer: &mut GlesRenderer,
     scale: f64,
 ) -> Vec<CustomElement<GlesRenderer>> {
@@ -166,7 +166,7 @@ fn build_mirror_elements(
 }
 
 fn render_frame(
-    state: &mut EafvilState,
+    state: &mut EmskinState,
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     output: &Output,
     damage_tracker: &mut OutputDamageTracker,
@@ -248,7 +248,7 @@ fn render_frame(
     }
 }
 
-fn post_render(state: &mut EafvilState, output: &Output) {
+fn post_render(state: &mut EmskinState, output: &Output) {
     state.space.elements().for_each(|window| {
         window.send_frame(
             output,
@@ -266,7 +266,7 @@ fn post_render(state: &mut EafvilState, output: &Output) {
 }
 
 /// Resize only the Emacs toplevel; EAF app sizes come from Emacs via IPC.
-fn resize_emacs_surface(state: &mut EafvilState, logical: Size<i32, Logical>) {
+fn resize_emacs_surface(state: &mut EmskinState, logical: Size<i32, Logical>) {
     let Some(ref emacs_surface) = state.emacs_surface else {
         return;
     };
@@ -286,8 +286,8 @@ fn resize_emacs_surface(state: &mut EafvilState, logical: Size<i32, Logical>) {
 }
 
 pub fn init_winit(
-    event_loop: &mut EventLoop<EafvilState>,
-    state: &mut EafvilState,
+    event_loop: &mut EventLoop<EmskinState>,
+    state: &mut EmskinState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut backend, winit) = winit::init()?;
 
@@ -306,7 +306,7 @@ pub fn init_winit(
             serial_number: "Unknown".into(),
         },
     );
-    let _global = output.create_global::<EafvilState>(&state.display_handle);
+    let _global = output.create_global::<EmskinState>(&state.display_handle);
     output.change_current_state(
         Some(mode),
         Some(Transform::Flipped180),

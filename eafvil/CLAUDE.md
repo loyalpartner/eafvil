@@ -1,4 +1,4 @@
-# eafvil - Nested Wayland Compositor for Emacs
+# emskin - Nested Wayland Compositor for Emacs
 
 ## Build
 - `cargo check` / `cargo clippy -- -D warnings` / `cargo fmt`
@@ -8,8 +8,8 @@
 - Nested Wayland compositor using smithay, hosting Emacs inside a winit window
 - First toplevel = Emacs (fullscreen), subsequent toplevels = EAF app windows managed by AppManager
 - IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, prefix_done, set_focus, set_crosshair, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror, request_activation_token. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed, focus_view, activation_token, xwayland_ready
-- Elisp client: `mvp/elisp/eaf-eafvil.el` — auto-connects via parent PID socket discovery, syncs geometry on `window-size-change-functions` with change-detection guard
-- Mirror system: same EAF app displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `eaf-eafvil--mirror-table`
+- Elisp client: `elisp/emskin.el` — auto-connects via parent PID socket discovery, syncs geometry on `window-size-change-functions` with change-detection guard
+- Mirror system: same EAF app displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `emskin--mirror-table`
 - Keyboard input: compositor detects Emacs prefix keys (C-x, C-c, M-x) via `input_intercept`, redirects focus to Emacs; `prefix_done` IPC restores focus. `set_focus` IPC for explicit focus control. Prefix state: `Option<Option<WlSurface>>` (outer None = inactive)
 - `AppWindow::wl_surface()` returns primary WlSurface (Wayland toplevel or X11 fallback)
 - grabs/ directory is placeholder code for future move/resize support

@@ -1,6 +1,6 @@
 //! X11 host clipboard synchronization.
 //!
-//! When eafvil runs on an X11 host (no Wayland compositor), this module bridges
+//! When emskin runs on an X11 host (no Wayland compositor), this module bridges
 //! the host X11 selection protocol with internal Wayland clients via the same
 //! `ClipboardEvent` interface used by the Wayland clipboard proxy.
 
@@ -38,10 +38,10 @@ x11rb::atom_manager! {
         INCR,
         UTF8_STRING,
         TEXT,
-        _EAFVIL_CLIP_SEL,
-        _EAFVIL_PRIM_SEL,
-        _EAFVIL_CLIP_INIT,
-        _EAFVIL_PRIM_INIT,
+        _EMSKIN_CLIP_SEL,
+        _EMSKIN_PRIM_SEL,
+        _EMSKIN_CLIP_INIT,
+        _EMSKIN_PRIM_INIT,
     }
 }
 
@@ -84,8 +84,8 @@ fn selection_atom(target: SelectionTarget, atoms: &ClipboardAtoms) -> Atom {
 
 fn property_atom(target: SelectionTarget, atoms: &ClipboardAtoms) -> Atom {
     match target {
-        SelectionTarget::Clipboard => atoms._EAFVIL_CLIP_SEL,
-        SelectionTarget::Primary => atoms._EAFVIL_PRIM_SEL,
+        SelectionTarget::Clipboard => atoms._EMSKIN_CLIP_SEL,
+        SelectionTarget::Primary => atoms._EMSKIN_PRIM_SEL,
     }
 }
 
@@ -241,12 +241,12 @@ impl X11ClipboardProxy {
             (
                 atoms.CLIPBOARD,
                 SelectionTarget::Clipboard,
-                atoms._EAFVIL_CLIP_INIT,
+                atoms._EMSKIN_CLIP_INIT,
             ),
             (
                 atoms.PRIMARY,
                 SelectionTarget::Primary,
-                atoms._EAFVIL_PRIM_INIT,
+                atoms._EMSKIN_PRIM_INIT,
             ),
         ] {
             let owner = conn

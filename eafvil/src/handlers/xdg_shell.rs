@@ -19,9 +19,9 @@ use smithay::{
     },
 };
 
-use crate::EafvilState;
+use crate::EmskinState;
 
-impl XdgShellHandler for EafvilState {
+impl XdgShellHandler for EmskinState {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
@@ -111,7 +111,7 @@ impl XdgShellHandler for EafvilState {
     }
 
     fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // Emacs is always fullscreen in eafvil — ignore move requests
+        // Emacs is always fullscreen in emskin — ignore move requests
     }
 
     fn resize_request(
@@ -121,11 +121,11 @@ impl XdgShellHandler for EafvilState {
         _serial: Serial,
         _edges: xdg_toplevel::ResizeEdge,
     ) {
-        // Emacs is always fullscreen in eafvil — ignore resize requests
+        // Emacs is always fullscreen in emskin — ignore resize requests
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
-        let Some(seat) = Seat::<EafvilState>::from_resource(&seat) else {
+        let Some(seat) = Seat::<EmskinState>::from_resource(&seat) else {
             return;
         };
         let kind = PopupKind::Xdg(surface);
@@ -212,14 +212,14 @@ impl XdgShellHandler for EafvilState {
 }
 
 // Xdg Shell
-delegate_xdg_shell!(EafvilState);
+delegate_xdg_shell!(EmskinState);
 
 // Xdg Decoration — always force server-side (no decorations drawn = borderless)
 use smithay::delegate_xdg_decoration;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 
-impl XdgDecorationHandler for EafvilState {
+impl XdgDecorationHandler for EmskinState {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(Mode::ServerSide);
@@ -242,7 +242,7 @@ impl XdgDecorationHandler for EafvilState {
     }
 }
 
-delegate_xdg_decoration!(EafvilState);
+delegate_xdg_decoration!(EmskinState);
 
 pub fn handle_surface_commit(
     popups: &mut PopupManager,
@@ -286,7 +286,7 @@ pub fn handle_surface_commit(
     }
 }
 
-impl EafvilState {
+impl EmskinState {
     fn is_emacs_surface(&self, surface: &ToplevelSurface) -> bool {
         Some(surface.wl_surface()) == self.emacs_surface.as_ref()
     }

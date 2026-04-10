@@ -2,11 +2,15 @@
   <img src="images/banner.png" alt="emskin — Emacs dressed in a Wayland compositor" width="720"/>
 </p>
 
-# eafvil
+# emskin
+
+> 给 Emacs 加上皮肤 — Dress Emacs in a Wayland skin.
 
 嵌套 Wayland 合成器，为 [Emacs Application Framework](https://github.com/emacs-eaf/emacs-application-framework) 提供原生 Wayland 应用嵌入能力。
 
-eafvil 在一个 winit 窗口内运行独立的 Wayland 合成器，Emacs 作为主窗口全屏运行，EAF 应用作为子窗口叠加在指定区域。
+> **迁移提示**（原 `eafvil` 用户）：本项目已从 `eafvil` 更名为 `emskin`。请将 `(require 'eaf-eafvil)` 改为 `(require 'emskin)`，`load-path` 指向 `…/emskin/elisp`，并重新编译二进制（路径和名称均已变更）。公开命令 `eaf-open-app` / `eaf-open-native-app` 分别重命名为 `emskin-open-app` / `emskin-open-native-app`。
+
+emskin 在一个 winit 窗口内运行独立的 Wayland 合成器，Emacs 作为主窗口全屏运行，EAF 应用作为子窗口叠加在指定区域。
 
 ![demo](screenshots/demo.gif)
 
@@ -40,11 +44,11 @@ sudo apt install libwayland-dev libxkbcommon-dev libegl-dev
 ## 编译
 
 ```bash
-cd eafvil
+cd emskin
 cargo build --release
 ```
 
-编译产物位于 `eafvil/target/release/eafvil`。
+编译产物位于 `emskin/target/release/emskin`。
 
 代码检查：
 
@@ -57,23 +61,23 @@ cargo fmt --check
 
 ### 直接启动
 
-eafvil 默认会自动启动 Emacs：
+emskin 默认会自动启动 Emacs：
 
 ```bash
-./target/release/eafvil
+./target/release/emskin
 ```
 
 ### CLI 参数
 
 ```
-eafvil [OPTIONS]
+emskin [OPTIONS]
 
 Options:
   --no-spawn              不启动 Emacs，等待外部连接
   --command <CMD>         启动命令 (默认: "emacs")
   --arg <ARG>             命令参数 (可多次指定)
   --standalone            独立模式：自动加载内置 elisp，无需用户配置
-  --ipc-path <PATH>       指定 IPC socket 路径 (默认: $XDG_RUNTIME_DIR/eafvil-<pid>.ipc)
+  --ipc-path <PATH>       指定 IPC socket 路径 (默认: $XDG_RUNTIME_DIR/emskin-<pid>.ipc)
   --xkb-layout <LAYOUT>   键盘布局 (例: "us", "cn")
   --xkb-model <MODEL>     键盘型号 (例: "pc105")
   --xkb-variant <VAR>     布局变体 (例: "nodeadkeys")
@@ -84,10 +88,10 @@ Options:
 
 **方式一：独立模式（零配置）**
 
-使用 `--standalone` 参数，eafvil 会自动将内置的 elisp 文件注入 Emacs，无需修改 init.el：
+使用 `--standalone` 参数，emskin 会自动将内置的 elisp 文件注入 Emacs，无需修改 init.el：
 
 ```bash
-./target/release/eafvil --standalone
+./target/release/emskin --standalone
 ```
 
 **方式二：手动配置**
@@ -95,8 +99,8 @@ Options:
 在 Emacs init.el 中加载 elisp 客户端：
 
 ```elisp
-(add-to-list 'load-path "/path/to/mvp/elisp")
-(require 'eaf-eafvil)
+(add-to-list 'load-path "/path/to/emskin/elisp")
+(require 'emskin)
 ```
 
 客户端会通过父进程 PID 自动发现 IPC socket 并连接。连接后 Emacs 窗口大小变化会自动同步给合成器。
@@ -108,16 +112,16 @@ Options:
 **Demo 应用**（`demo/` 目录下的 Python PyQt6 应用）：
 
 ```
-M-x eaf-open-app RET demo      — 交互式 Demo（文本输入、按钮、键盘事件）
-M-x eaf-open-app RET caliper   — 几何对齐调试工具（边框标尺、坐标标签）
+M-x emskin-open-app RET demo      — 交互式 Demo（文本输入、按钮、键盘事件）
+M-x emskin-open-app RET caliper   — 几何对齐调试工具（边框标尺、坐标标签）
 ```
 
 **原生应用**（任意 Wayland/X11 程序）：
 
 ```
-M-x eaf-open-native-app RET firefox     — 启动 Firefox
-M-x eaf-open-native-app RET foot        — 启动 foot 终端
-M-x eaf-open-native-app RET mpv foo.mp4 — 启动 mpv 播放视频
+M-x emskin-open-native-app RET firefox     — 启动 Firefox
+M-x emskin-open-native-app RET foot        — 启动 foot 终端
+M-x emskin-open-native-app RET mpv foo.mp4 — 启动 mpv 播放视频
 ```
 
 应用启动后会自动获取 xdg_activation 令牌和焦点，窗口位置由 Emacs 通过 IPC 控制。
@@ -125,7 +129,7 @@ M-x eaf-open-native-app RET mpv foo.mp4 — 启动 mpv 播放视频
 ## 项目结构
 
 ```
-eafvil/         Rust 嵌套 Wayland 合成器
+emskin/         Rust 嵌套 Wayland 合成器
   src/
     main.rs       入口，CLI 解析，事件循环
     state.rs      合成器状态

@@ -3,7 +3,7 @@ mod xdg_activation;
 mod xdg_shell;
 mod xwayland;
 
-use crate::EafvilState;
+use crate::EmskinState;
 
 //
 // Wl Seat
@@ -27,12 +27,12 @@ use smithay::wayland::selection::primary_selection::{
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::{delegate_data_device, delegate_output, delegate_primary_selection, delegate_seat};
 
-impl SeatHandler for EafvilState {
+impl SeatHandler for EmskinState {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
-    fn seat_state(&mut self) -> &mut SeatState<EafvilState> {
+    fn seat_state(&mut self) -> &mut SeatState<EmskinState> {
         &mut self.seat_state
     }
 
@@ -51,13 +51,13 @@ impl SeatHandler for EafvilState {
     }
 }
 
-delegate_seat!(EafvilState);
+delegate_seat!(EmskinState);
 
 //
 // Wl Data Device
 //
 
-impl SelectionHandler for EafvilState {
+impl SelectionHandler for EmskinState {
     type SelectionUserData = ();
 
     fn new_selection(
@@ -109,14 +109,14 @@ impl SelectionHandler for EafvilState {
     }
 }
 
-impl DataDeviceHandler for EafvilState {
+impl DataDeviceHandler for EmskinState {
     fn data_device_state(&mut self) -> &mut DataDeviceState {
         &mut self.data_device_state
     }
 }
 
-impl DndGrabHandler for EafvilState {}
-impl WaylandDndGrabHandler for EafvilState {
+impl DndGrabHandler for EmskinState {}
+impl WaylandDndGrabHandler for EmskinState {
     fn dnd_requested<S: Source>(
         &mut self,
         source: S,
@@ -145,23 +145,23 @@ impl WaylandDndGrabHandler for EafvilState {
     }
 }
 
-delegate_data_device!(EafvilState);
+delegate_data_device!(EmskinState);
 
 //
 // Primary Selection
 //
 
-impl PrimarySelectionHandler for EafvilState {
+impl PrimarySelectionHandler for EmskinState {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.primary_selection_state
     }
 }
 
-delegate_primary_selection!(EafvilState);
+delegate_primary_selection!(EmskinState);
 
 //
 // Wl Output & Xdg Output
 //
 
-impl OutputHandler for EafvilState {}
-delegate_output!(EafvilState);
+impl OutputHandler for EmskinState {}
+delegate_output!(EmskinState);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal EAF demo app — connects to the eafvil Wayland compositor."""
+"""Minimal EAF demo app — connects to the emskin Wayland compositor."""
 import sys
 
 from PyQt6.QtWidgets import (
@@ -24,7 +24,7 @@ class DemoWindow(QMainWindow):
         layout = QVBoxLayout(central)
 
         layout.addWidget(
-            QLabel("<h2>EAF Demo</h2><p>Running inside eafvil compositor.</p>")
+            QLabel("<h2>EAF Demo</h2><p>Running inside emskin compositor.</p>")
         )
 
         self.input = QLineEdit()
