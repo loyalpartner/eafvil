@@ -151,6 +151,31 @@ impl EmskinState {
                     }
                 }
 
+                // Workspace bar: click on a button → switch workspace.
+                if event.button() == Some(MouseButton::Left)
+                    && button_state == ButtonState::Pressed
+                    && self.bar_enabled
+                {
+                    let pos = pointer.current_location();
+                    tracing::debug!(
+                        "bar click check: pos=({:.0},{:.0}) visible={} buttons={}",
+                        pos.x,
+                        pos.y,
+                        self.workspace_bar.visible(),
+                        self.workspace_bar.button_count(),
+                    );
+                    if let Some(ws_id) = self.workspace_bar.click_at(pos) {
+                        tracing::info!("bar click → workspace {ws_id}");
+                        if ws_id != self.active_workspace_id && self.switch_workspace(ws_id) {
+                            self.ipc
+                                .send(crate::ipc::OutgoingMessage::WorkspaceSwitched {
+                                    workspace_id: ws_id,
+                                });
+                        }
+                        return;
+                    }
+                }
+
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
                     let pos = pointer.current_location();
                     let under = self.surface_under(pos);
@@ -165,7 +190,9 @@ impl EmskinState {
 
                     // Left-click on an embedded app → tell Emacs to select that window.
                     if event.button() == Some(MouseButton::Left) {
-                        if let Some((window_id, view_id, _)) = self.apps.mirror_under(pos) {
+                        if let Some((window_id, view_id, _)) =
+                            self.apps.mirror_under(pos, self.active_workspace_id)
+                        {
                             self.ipc.send(crate::ipc::OutgoingMessage::FocusView {
                                 window_id,
                                 view_id,

@@ -203,17 +203,21 @@ fn build_mirror_elements(
                 continue;
             }
 
-            for (&view_id, mirror_geo) in &app.mirrors {
-                let Some(ratio) =
-                    crate::apps::AppManager::aspect_fit_ratio(src_size, mirror_geo.size.to_f64())
-                else {
+            for (&view_id, mirror) in &app.mirrors {
+                if mirror.workspace_id != state.active_workspace_id {
+                    continue;
+                }
+                let Some(ratio) = crate::apps::AppManager::aspect_fit_ratio(
+                    src_size,
+                    mirror.geometry.size.to_f64(),
+                ) else {
                     continue;
                 };
 
                 for snap in &snapshots {
                     let loc = Point::<f64, Logical>::from((
-                        mirror_geo.loc.x as f64 + snap.offset.x * ratio,
-                        mirror_geo.loc.y as f64 + snap.offset.y * ratio,
+                        mirror.geometry.loc.x as f64 + snap.offset.x * ratio,
+                        mirror.geometry.loc.y as f64 + snap.offset.y * ratio,
                     ));
                     let fit_w = (snap.view_dst.w as f64 * ratio).round() as i32;
                     let fit_h = (snap.view_dst.h as f64 * ratio).round() as i32;
@@ -367,9 +371,24 @@ fn render_frame(
             }
         }
 
+        let output_size_log: Size<i32, Logical> = size.to_f64().to_logical(scale).to_i32_round();
+
+        // Workspace bar: absolute topmost layer (above skeleton).
+        if state.bar_enabled && state.workspace_bar.visible() {
+            let (bar_solids, bar_labels) =
+                state
+                    .workspace_bar
+                    .build_elements(renderer, output_size_log, scale);
+            for l in bar_labels {
+                custom_elements.push(l.into());
+            }
+            for s in bar_solids {
+                custom_elements.push(s.into());
+            }
+        }
+
         // Skeleton: topmost debug overlay. Push labels first, borders second, so labels
         // end up above borders within the skeleton layer group.
-        let output_size_log: Size<i32, Logical> = size.to_f64().to_logical(scale).to_i32_round();
         let (skel_solids, skel_labels) =
             state
                 .skeleton
@@ -480,30 +499,13 @@ fn post_render(state: &mut EmskinState, output: &Output) {
 
 /// Resize only the Emacs toplevel; embedded app sizes come from Emacs via IPC.
 fn resize_emacs_surface(state: &mut EmskinState, logical: Size<i32, Logical>) {
-    // Wayland (pgtk) path.
-    if let Some(ref emacs_surface) = state.emacs_surface {
-        for window in state.space.elements() {
-            let Some(toplevel) = window.toplevel() else {
-                continue;
-            };
-            if toplevel.wl_surface() == emacs_surface {
-                toplevel.with_pending_state(|s| {
-                    s.size = Some(logical);
-                });
-                toplevel.send_pending_configure();
-                return;
-            }
-        }
-    }
-    // X11 Emacs path — configure the X11 window directly.
-    if let Some(ref win) = state.emacs_x11_window {
-        if let Some(x11) = win.x11_surface() {
-            let geo = smithay::utils::Rectangle::new((0, 0).into(), logical);
-            if let Err(e) = x11.configure(geo) {
-                tracing::warn!("X11 Emacs resize failed: {e}");
-            }
-        }
-    }
+    let geo = smithay::utils::Rectangle::new((0, 0).into(), logical);
+    crate::resize_emacs_in_space(
+        &mut state.space,
+        &state.emacs_surface.clone(),
+        &state.emacs_x11_window.clone(),
+        geo,
+    );
 }
 
 pub fn init_winit(
@@ -573,6 +575,16 @@ pub fn init_winit(
                     if state.initial_size_settled {
                         let logical = size.to_f64().to_logical(scale_factor).to_i32_round();
                         resize_emacs_surface(state, logical);
+                        // Also resize Emacs in all inactive workspaces.
+                        let geo = smithay::utils::Rectangle::new((0, 0).into(), logical);
+                        for ws in state.inactive_workspaces.values_mut() {
+                            crate::resize_emacs_in_space(
+                                &mut ws.space,
+                                &ws.emacs_surface,
+                                &ws.emacs_x11_window,
+                                geo,
+                            );
+                        }
                     }
                 }
 

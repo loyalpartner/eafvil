@@ -57,8 +57,33 @@ impl XdgShellHandler for EmskinState {
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(self, self.emacs_surface.clone(), serial);
             }
+        } else if self.is_emacs_client(surface.wl_surface()) {
+            // Same Wayland client as Emacs — could be a new frame (C-x 5 2) or
+            // a child frame (posframe, company-posframe, etc.).
+            //
+            // We can't tell yet: set_parent() hasn't been processed at this point
+            // (GTK sends get_toplevel + set_parent in the same Wayland batch, but
+            // set_parent is processed after new_toplevel). Defer the decision to
+            // the event loop idle callback where surface.parent() is available.
+            //
+            // Configure Fullscreen + output size and send immediately.
+            // Don't wait for handle_surface_commit — sending now ensures GTK
+            // sees Fullscreen as the very first configure (no CSD flash).
+            // GTK ignores Fullscreen on transient (child) windows, so this is
+            // safe even if this turns out to be a child frame.
+            if let Some(geo) = self.output_fullscreen_geo() {
+                surface.with_pending_state(|s| {
+                    s.size = Some(geo.size);
+                    s.states.set(xdg_toplevel::State::Fullscreen);
+                });
+                surface.send_configure();
+            }
+            let window = Window::new_wayland_window(surface.clone());
+            self.space.map_element(window.clone(), (0, 0), false);
+            self.pending_emacs_toplevels.push((surface, window));
+            tracing::info!("Emacs client toplevel detected — deferred for parent check");
         } else {
-            // Subsequent toplevels = embedded app windows.
+            // Subsequent toplevels from other clients = embedded app windows.
             let window_id = self.apps.alloc_id();
             let title =
                 Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.title.clone()))
@@ -82,6 +107,7 @@ impl XdgShellHandler for EmskinState {
             self.apps.insert(crate::apps::AppWindow {
                 window_id,
                 window,
+                workspace_id: self.active_workspace_id,
                 geometry: None,
                 pending_geometry: None,
                 pending_since: None,
@@ -216,10 +242,13 @@ impl XdgShellHandler for EmskinState {
         let title =
             Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.title.clone()));
         if self.is_emacs_surface(&surface) {
+            // Active workspace Emacs — forward title to host window.
             if let Some(title) = title {
                 tracing::debug!("Emacs title changed: {title}");
                 self.emacs_title = Some(title);
             }
+        } else if self.is_any_emacs_surface(surface.wl_surface()) {
+            // Inactive workspace Emacs frame — ignore (don't set host title).
         } else if let Some(window_id) = self.apps.id_for_surface(surface.wl_surface()) {
             if let Some(title) = title {
                 self.ipc
@@ -237,6 +266,7 @@ impl XdgShellHandler for EmskinState {
                 self.emacs_app_id = Some(app_id);
             }
         }
+        // Inactive workspace Emacs or other surfaces: ignore app_id changes.
     }
 }
 

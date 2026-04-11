@@ -6,14 +6,16 @@ mod cursor_x11;
 mod handlers;
 mod input;
 pub mod ipc;
+mod protocols;
 mod skeleton;
 mod state;
 mod utils;
 mod winit;
+mod workspace_bar;
 
 use clap::Parser;
 use include_dir::{include_dir, Dir};
-use smithay::reexports::wayland_server::Display;
+use smithay::reexports::wayland_server::{Display, Resource};
 pub use state::EmskinState;
 
 static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../elisp");
@@ -58,6 +60,10 @@ struct Cli {
     /// Standalone mode: auto-load built-in elisp without user config.
     #[arg(long)]
     standalone: bool,
+
+    /// Workspace bar mode: "builtin" (default) or "none".
+    #[arg(long, default_value = "builtin")]
+    bar: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -105,6 +111,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open a Wayland/X11 window for our nested compositor
     crate::winit::init_winit(&mut event_loop, &mut state)?;
 
+    match cli.bar.as_str() {
+        "builtin" | "none" => {}
+        other => {
+            eprintln!("Unknown --bar value '{other}', expected 'builtin' or 'none'");
+            std::process::exit(1);
+        }
+    }
+    state.bar_enabled = cli.bar != "none";
+
     if !cli.no_spawn {
         state.pending_command = Some(state::PendingCommand {
             command: cli.command.clone(),
@@ -123,18 +138,167 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // --- Workspace: process deferred Emacs toplevels ---
+        // After dispatch_clients, set_parent has been processed for same-batch
+        // toplevels, so surface.parent() is now accurate.
+        let pending = std::mem::take(&mut state.pending_emacs_toplevels);
+        for (surface, window) in pending {
+            if surface.parent().is_some() {
+                // Child frame (posframe, etc.) — leave in current space, GTK manages.
+                tracing::info!("Emacs child frame confirmed (has parent), workspace {}",
+                    state.active_workspace_id);
+            } else {
+                // Real new Emacs frame — create workspace.
+                state.space.unmap_elem(&window);
+                let ws_id = state.alloc_workspace_id();
+                tracing::info!("new Emacs frame → workspace {ws_id}");
+
+                // Create workspace first (before computing geometry, because
+                // workspace_count() affects bar_height which affects emacs_geometry).
+                let emacs_wl = surface.wl_surface().clone();
+                let mut new_space = smithay::desktop::Space::default();
+                if let Some(output) = state.space.outputs().next().cloned() {
+                    new_space.map_output(&output, (0, 0));
+                }
+
+                state.inactive_workspaces.insert(
+                    ws_id,
+                    crate::state::Workspace {
+                        space: new_space,
+                        emacs_surface: Some(emacs_wl),
+                        emacs_x11_window: None,
+                    },
+                );
+
+                // Now workspace_count() > 1 → bar appears → emacs_geometry
+                // accounts for bar height. Configure the new frame.
+                if let Some(geo) = state.emacs_geometry() {
+                    surface.with_pending_state(|s| {
+                        s.size = Some(geo.size);
+                        s.states.set(
+                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
+                        );
+                    });
+                    surface.send_pending_configure();
+
+                    // Map window at bar offset in the new workspace's space.
+                    if let Some(ws) = state.inactive_workspaces.get_mut(&ws_id) {
+                        ws.space.map_element(window, geo.loc, false);
+                    }
+                }
+
+                // Resize existing Emacs frames for bar (1→2 workspace transition).
+                resize_all_emacs_for_bar(state);
+
+                state
+                    .ipc
+                    .send(ipc::OutgoingMessage::WorkspaceCreated { workspace_id: ws_id });
+
+                // Switch immediately.
+                state.switch_workspace(ws_id);
+                state
+                    .ipc
+                    .send(ipc::OutgoingMessage::WorkspaceSwitched { workspace_id: ws_id });
+            }
+        }
+
+        // --- Workspace: process ext-workspace-v1 client actions ---
+        for action in state.workspace_protocol.take_pending_actions() {
+            use crate::protocols::workspace::WorkspaceAction;
+            match action {
+                WorkspaceAction::Activate(id) => {
+                    if state.switch_workspace(id) {
+                        state.ipc.send(ipc::OutgoingMessage::WorkspaceSwitched {
+                            workspace_id: id,
+                        });
+                    }
+                }
+                WorkspaceAction::Remove(id) => {
+                    if id != state.active_workspace_id {
+                        state.destroy_workspace(id);
+                        state.ipc.send(ipc::OutgoingMessage::WorkspaceDestroyed {
+                            workspace_id: id,
+                        });
+                    }
+                }
+                _ => {} // Deactivate / CreateWorkspace: future extension
+            }
+        }
+
+        // --- Workspace: detect dead Emacs frames in inactive workspaces ---
+        let dead_ws: Vec<u64> = state.inactive_workspaces.iter()
+            .filter(|(_, ws)| {
+                ws.emacs_surface.as_ref().is_none_or(|s| !s.is_alive())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let had_dead = !dead_ws.is_empty();
+        for ws_id in dead_ws {
+            state.destroy_workspace(ws_id);
+            state
+                .ipc
+                .send(ipc::OutgoingMessage::WorkspaceDestroyed { workspace_id: ws_id });
+            tracing::info!("workspace {ws_id} destroyed (Emacs frame died)");
+        }
+        if had_dead {
+            // Bar might have disappeared (2→1 workspace) — resize Emacs back to fullscreen.
+            resize_all_emacs_for_bar(state);
+        }
+
+        // --- Workspace: detect active Emacs frame death ---
+        if state.emacs_surface.as_ref().is_some_and(|s| !s.is_alive())
+            && state.initial_size_settled
+        {
+            if let Some(&fallback_id) = state.inactive_workspaces.keys().next() {
+                tracing::info!("active Emacs died, switching to workspace {fallback_id}");
+                state.switch_workspace(fallback_id);
+                state.ipc.send(ipc::OutgoingMessage::WorkspaceSwitched {
+                    workspace_id: fallback_id,
+                });
+            } else {
+                tracing::info!("last Emacs frame died, stopping");
+                state.loop_signal.stop();
+            }
+        }
+
+        // --- Workspace: refresh ext-workspace-v1 protocol + bar ---
+        {
+            let ws_ids = state.all_workspace_ids();
+            let ws_infos: Vec<crate::protocols::workspace::WorkspaceInfo> = ws_ids
+                .iter()
+                .map(|&id| crate::protocols::workspace::WorkspaceInfo {
+                    id,
+                    name: format!("Workspace {id}"),
+                    active: id == state.active_workspace_id,
+                })
+                .collect();
+            if let Some(output) = state.space.outputs().next().cloned() {
+                let dh = state.display_handle.clone();
+                state.workspace_protocol.refresh(&dh, &ws_infos, &output);
+            }
+            state.workspace_protocol.cleanup_dead();
+
+            if state.bar_enabled {
+                state
+                    .workspace_bar
+                    .update(&ws_ids, state.active_workspace_id);
+            }
+        }
+
         // Clean up embedded app windows whose Wayland surface was destroyed.
+        // Route unmap to the correct workspace's space.
         let dead = state.apps.drain_dead();
         if !dead.is_empty() {
             for app in &dead {
-                state.space.unmap_elem(&app.window);
+                if let Some(space) = state.space_for_workspace_mut(app.workspace_id) {
+                    space.unmap_elem(&app.window);
+                }
                 state.ipc.send(ipc::OutgoingMessage::WindowDestroyed {
                     window_id: app.window_id,
                 });
                 tracing::info!("embedded app window_id={} destroyed", app.window_id);
             }
-            // Fall back to Emacs when focus is lost. Emacs will redirect
-            // focus to the appropriate app via set_focus IPC if needed.
+            // Fall back to Emacs when focus is lost.
             if let Some(keyboard) = state.seat.get_keyboard() {
                 if keyboard.current_focus().is_none() {
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -172,7 +336,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .apps
             .collect_timed_out(std::time::Duration::from_millis(100))
         {
-            state.space.map_element(window, geo.loc, false);
+            let ws_id = state
+                .apps
+                .get(window_id)
+                .map(|a| a.workspace_id)
+                .unwrap_or(state.active_workspace_id);
+            if let Some(space) = state.space_for_workspace_mut(ws_id) {
+                space.map_element(window, geo.loc, false);
+            }
             tracing::debug!(
                 "embedded app window_id={window_id} geometry force-committed (timeout)"
             );
@@ -304,6 +475,72 @@ fn default_ipc_path() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{}/emskin-{pid}.ipc", runtime_dir()))
 }
 
+/// Resize and reposition the Emacs window in a given space.
+/// Resize and reposition the Emacs window in a given space.
+/// Handles both Wayland (pgtk) and X11 (gtk3 via XWayland) paths.
+pub fn resize_emacs_in_space(
+    space: &mut smithay::desktop::Space<smithay::desktop::Window>,
+    emacs_surface: &Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+    emacs_x11_window: &Option<smithay::desktop::Window>,
+    geo: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+) {
+    // Wayland (pgtk) path.
+    if let Some(ref emacs) = emacs_surface {
+        let win = space
+            .elements()
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == emacs))
+            .cloned();
+        if let Some(window) = win {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| {
+                    s.size = Some(geo.size);
+                });
+                toplevel.send_pending_configure();
+            }
+            space.map_element(window, geo.loc, false);
+            return;
+        }
+    }
+    // X11 (gtk3) path.
+    if let Some(ref win) = emacs_x11_window {
+        if let Some(x11) = win.x11_surface() {
+            if let Err(e) = x11.configure(geo) {
+                tracing::warn!("X11 Emacs resize failed: {e}");
+            }
+        }
+    }
+}
+
+/// Resize and reposition all Emacs frames to account for bar height changes.
+/// Called when workspace count transitions (1→2 or 2→1).
+fn resize_all_emacs_for_bar(state: &mut EmskinState) {
+    let Some(geo) = state.emacs_geometry() else {
+        return;
+    };
+    tracing::info!(
+        "bar transition: emacs geometry = ({},{}) {}x{}",
+        geo.loc.x,
+        geo.loc.y,
+        geo.size.w,
+        geo.size.h,
+    );
+
+    resize_emacs_in_space(
+        &mut state.space,
+        &state.emacs_surface.clone(),
+        &state.emacs_x11_window.clone(),
+        geo,
+    );
+    for ws in state.inactive_workspaces.values_mut() {
+        resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, &ws.emacs_x11_window, geo);
+    }
+
+    state.ipc.send(ipc::OutgoingMessage::SurfaceSize {
+        width: geo.size.w,
+        height: geo.size.h,
+    });
+}
+
 fn handle_ipc_message(state: &mut EmskinState, msg: ipc::IncomingMessage) {
     use ipc::IncomingMessage;
     match msg {
@@ -367,6 +604,14 @@ fn handle_ipc_message(state: &mut EmskinState, msg: ipc::IncomingMessage) {
                 state.skeleton.clear();
             }
         }
+        IncomingMessage::SwitchWorkspace { workspace_id } => {
+            tracing::debug!("IPC switch_workspace {workspace_id}");
+            if state.switch_workspace(workspace_id) {
+                state
+                    .ipc
+                    .send(ipc::OutgoingMessage::WorkspaceSwitched { workspace_id });
+            }
+        }
     }
 }
 
@@ -376,14 +621,22 @@ fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, x: i32, y: i32, w: 
         tracing::warn!("IPC set_geometry: invalid size ({w}x{h}), ignoring");
         return;
     }
-    let new_geo = smithay::utils::Rectangle::new((x, y).into(), (w, h).into());
+    // IPC coordinates are relative to Emacs surface; offset by bar height.
+    let bar_h = state.bar_height();
+    let ay = y + bar_h;
+    let new_geo = smithay::utils::Rectangle::new((x, ay).into(), (w, h).into());
     let Some(app) = state.apps.get_mut(window_id) else {
         return;
     };
     app.visible = true;
 
+    state.migrate_app_to_active(window_id);
+
+    let Some(app) = state.apps.get_mut(window_id) else {
+        return;
+    };
+
     if let Some(toplevel) = app.window.toplevel() {
-        // Wayland path — async configure + pending geometry.
         use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
         toplevel.with_pending_state(|s| {
             s.size = Some((w, h).into());
@@ -397,19 +650,19 @@ fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, x: i32, y: i32, w: 
         if app.geometry.is_none() {
             app.geometry = Some(new_geo);
             let window = app.window.clone();
-            state.space.map_element(window, (x, y), false);
+            // Always map in active workspace (after migration).
+            state.space.map_element(window, new_geo.loc, false);
         } else {
             app.pending_geometry = Some(new_geo);
             app.pending_since = Some(std::time::Instant::now());
         }
     } else if let Some(x11) = app.window.x11_surface() {
-        // X11 path — configure takes effect immediately.
         if let Err(e) = x11.configure(new_geo) {
             tracing::warn!("X11 configure failed for window_id={window_id}: {e}");
         }
         app.geometry = Some(new_geo);
         let window = app.window.clone();
-        state.space.map_element(window, (x, y), false);
+        state.space.map_element(window, new_geo.loc, false);
     }
 }
 
@@ -435,8 +688,13 @@ fn ipc_set_visibility(state: &mut EmskinState, window_id: u64, visible: bool) {
     let win = app.window.clone();
     let geo = app.geometry;
     if !visible {
-        state.space.unmap_elem(&win);
+        // Unmap from whichever space it's in.
+        let ws_id = app.workspace_id;
+        if let Some(space) = state.space_for_workspace_mut(ws_id) {
+            space.unmap_elem(&win);
+        }
     } else if let Some(geo) = geo {
+        state.migrate_app_to_active(window_id);
         state.space.map_element(win, geo.loc, false);
     }
 }
@@ -462,17 +720,28 @@ fn ipc_add_mirror(
     w: i32,
     h: i32,
 ) {
-    tracing::debug!("IPC add_mirror window={window_id} view={view_id} ({x},{y},{w},{h})");
+    // Compositor auto-binds to active workspace — elisp doesn't need to know.
+    let ws_id = state.active_workspace_id;
+    tracing::debug!(
+        "IPC add_mirror window={window_id} view={view_id} ({x},{y},{w},{h}) ws={ws_id}"
+    );
     if w <= 0 || h <= 0 {
         tracing::warn!("IPC add_mirror: invalid size ({w}x{h}), ignoring");
         return;
     }
-    let geo = smithay::utils::Rectangle::new((x, y).into(), (w, h).into());
+    let bar_h = state.bar_height();
+    let geo = smithay::utils::Rectangle::new((x, y + bar_h).into(), (w, h).into());
     let Some(app) = state.apps.get_mut(window_id) else {
         tracing::warn!("add_mirror: unknown window_id={window_id}");
         return;
     };
-    app.mirrors.insert(view_id, geo);
+    app.mirrors.insert(
+        view_id,
+        crate::apps::MirrorView {
+            geometry: geo,
+            workspace_id: ws_id,
+        },
+    );
 }
 
 fn ipc_update_mirror_geometry(
@@ -491,12 +760,13 @@ fn ipc_update_mirror_geometry(
         tracing::warn!("IPC update_mirror_geometry: invalid size ({w}x{h}), ignoring");
         return;
     }
-    let geo = smithay::utils::Rectangle::new((x, y).into(), (w, h).into());
+    let bar_h = state.bar_height();
+    let geo = smithay::utils::Rectangle::new((x, y + bar_h).into(), (w, h).into());
     let Some(app) = state.apps.get_mut(window_id) else {
         return;
     };
-    if let Some(slot) = app.mirrors.get_mut(&view_id) {
-        *slot = geo;
+    if let Some(mirror) = app.mirrors.get_mut(&view_id) {
+        mirror.geometry = geo;
     }
 }
 
@@ -531,12 +801,30 @@ fn ipc_promote_mirror(state: &mut EmskinState, window_id: u64, view_id: u64) {
         return;
     };
     // The promoted mirror becomes the source — its geometry becomes
-    // the app's source geometry. Surface is NOT resized (resize only
-    // happens when the user manually adjusts the window size).
-    if let Some(geo) = app.mirrors.remove(&view_id) {
-        app.geometry = Some(geo);
+    // the app's source geometry. If the mirror is in a different workspace,
+    // migrate the app to that workspace.
+    if let Some(mirror) = app.mirrors.remove(&view_id) {
+        let old_ws = app.workspace_id;
+        let new_ws = mirror.workspace_id;
+        app.geometry = Some(mirror.geometry);
         let window = app.window.clone();
-        state.space.map_element(window, geo.loc, false);
+
+        if old_ws != new_ws {
+            // Cross-workspace migration: unmap from old, map in new.
+            app.workspace_id = new_ws;
+            if let Some(space) = state.space_for_workspace_mut(old_ws) {
+                space.unmap_elem(&window);
+            }
+            // Re-borrow for the target workspace.
+            let app_geo = state.apps.get(window_id).and_then(|a| a.geometry);
+            if let Some(geo) = app_geo {
+                if let Some(space) = state.space_for_workspace_mut(new_ws) {
+                    space.map_element(window, geo.loc, false);
+                }
+            }
+        } else {
+            state.space.map_element(window, mirror.geometry.loc, false);
+        }
     }
 }
 

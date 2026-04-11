@@ -89,6 +89,7 @@ impl XwmHandler for EmskinState {
         self.apps.insert(crate::apps::AppWindow {
             window_id,
             window: win,
+            workspace_id: self.active_workspace_id,
             geometry: Some(geo),
             pending_geometry: None,
             pending_since: None,

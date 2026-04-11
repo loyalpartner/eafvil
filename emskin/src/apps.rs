@@ -10,10 +10,21 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-/// An embedded embedded application window.
+/// A mirror view of an embedded app, possibly in a different workspace than
+/// its source. The source texture is accessed via WlSurface directly (not
+/// through Space), so cross-workspace mirrors work naturally.
+pub struct MirrorView {
+    pub geometry: Rectangle<i32, Logical>,
+    /// Which workspace this mirror is displayed in.
+    pub workspace_id: u64,
+}
+
+/// An embedded application window.
 pub struct AppWindow {
     pub window_id: u64,
     pub window: Window,
+    /// Which workspace this app's source surface belongs to.
+    pub workspace_id: u64,
     /// Committed geometry (logical px) — currently used for rendering.
     pub geometry: Option<Rectangle<i32, Logical>>,
     /// Pending geometry awaiting the client's next buffer commit.
@@ -21,9 +32,10 @@ pub struct AppWindow {
     /// When `pending_geometry` was set (for timeout-based force-commit).
     pub pending_since: Option<Instant>,
     pub visible: bool,
-    /// Mirror views: view_id → geometry. Each entry is a scaled copy of the
-    /// source surface, positioned at the given rectangle.
-    pub mirrors: HashMap<u64, Rectangle<i32, Logical>>,
+    /// Mirror views: view_id → MirrorView. Each entry is a scaled copy of the
+    /// source surface, positioned at the given rectangle. Mirrors can be in a
+    /// different workspace than the source.
+    pub mirrors: HashMap<u64, MirrorView>,
 }
 
 /// A renderable surface layer — toplevel or popup.
@@ -163,11 +175,13 @@ impl AppManager {
         Some((dst.w / src.w).min(dst.h / src.h))
     }
 
-    /// Check if `pos` falls inside any mirror of any app window.
+    /// Check if `pos` falls inside any mirror in the given workspace.
     /// Returns (window_id, view_id, mapped surface coordinate) with proportional mapping.
+    /// Only checks mirrors whose `workspace_id` matches `active_workspace_id`.
     pub fn mirror_under(
         &self,
         pos: smithay::utils::Point<f64, Logical>,
+        active_workspace_id: u64,
     ) -> Option<(u64, u64, smithay::utils::Point<f64, Logical>)> {
         for app in self.windows.values() {
             let Some(source_geo) = app.geometry else {
@@ -175,8 +189,11 @@ impl AppManager {
             };
             let src_size = source_geo.size.to_f64();
 
-            for (&view_id, mirror_geo) in &app.mirrors {
-                let m = mirror_geo.to_f64();
+            for (&view_id, mirror) in &app.mirrors {
+                if mirror.workspace_id != active_workspace_id {
+                    continue;
+                }
+                let m = mirror.geometry.to_f64();
                 let Some(ratio) = Self::aspect_fit_ratio(src_size, m.size) else {
                     continue;
                 };

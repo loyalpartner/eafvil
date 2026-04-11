@@ -23,6 +23,13 @@
 - Elisp auto-connect: `emskin-maybe-auto-connect` must NOT be gated on `(featurep 'pgtk)` — X11 Emacs also needs IPC connection. Gate only on socket file existence
 - `EmskinState::output_fullscreen_geo()` — shared helper for output→mode→scale→logical fullscreen geometry, used by xwayland handlers and resize logic
 - grabs/ directory is placeholder code for future move/resize support
+- Workspace model: each Emacs frame = one workspace. Active workspace's state lives in `self.space` + `self.emacs_surface`; inactive workspaces stored in `inactive_workspaces: HashMap<u64, Workspace>`. Switching = swap (std::mem::take). `frame-visible-p` in elisp controls which frames participate in sync — extensibility point for future side-by-side layout
+- App migration: apps follow the Emacs window that displays them. `ipc_set_geometry` auto-migrates via `migrate_app_to_active()` (unmap from old space, update workspace_id, map in active space). No mirrors needed for workspace switching — real surface moves to whichever workspace is active
+- Mirror vs migration: mirrors are for simultaneous visibility (future side-by-side); migration is for workspace switching (one visible at a time). `sync-all` only processes `frame-visible-p` frames, so invisible workspace frames don't trigger mirror creation
+- Child frame detection: pgtk child frames (posframe, company-posframe) also create xdg_toplevel from same Wayland client. Deferred to idle callback via `pending_emacs_toplevels` — check `ToplevelSurface::parent()` after dispatch_clients (GTK batches get_toplevel + set_parent in same Wayland message). Parent present = child frame (stays in current space); absent = real frame (creates workspace)
+- Workspace bar: `workspace_bar.rs`, 28px top strip, only when 2+ workspaces and `--bar=builtin`. Emacs frame positioned at (0, bar_height) with size (W, H-bar_height). IPC coordinates are Emacs-relative — compositor adds `bar_height()` to y in `ipc_set_geometry`/`ipc_add_mirror`/`ipc_update_mirror_geometry`
+- ext-workspace-v1 protocol: `protocols/workspace.rs` — diff-based refresh model, action queue for client requests. Compositor is the single source of truth; IPC and protocol operate on same workspace state
+- IPC extensions: Emacs→compositor: `switch_workspace`. Compositor→Emacs: `workspace_created`, `workspace_switched`, `workspace_destroyed`
 
 ## Key Gotchas
 - smithay winit backend defaults to 10-10-10-2 pixel format (2-bit alpha) — breaks GTK semi-transparent UI. Fixed by prioritizing 8-bit in smithay's `backend/winit/mod.rs`
@@ -70,6 +77,13 @@
 - Layer shell keyboard focus timing: `new_layer_surface` fires on `get_layer_surface` (BEFORE initial commit) — cached_state has no keyboard_interactivity yet. Must defer focus to compositor commit handler where `can_receive_keyboard_focus()` works correctly
 - Layer shell destroy: only reclaim focus if `keyboard.current_focus() == destroyed surface` — unconditional fallback steals focus from other active windows
 - Code language: all comments, tracing logs, and doc comments must be in English. No Chinese in Rust source code
+- Workspace switch must reset: `prefix_saved_focus`, `text_input_focus`, `pending_ime_allowed`, `skeleton`, `cursor_status` (if Surface), pointer focus (send motion with None). Without this, stale references to old workspace surfaces cause events sent to wrong clients
+- Focus feedback loop on workspace switch: Wayland keyboard.enter arrives at GTK BEFORE IPC `workspace_switched` reaches elisp. `after-focus-change-function` sees stale `active-workspace-id` and sends bogus `switch_workspace` back. Fix: `emskin--workspace-switch-suppressed` flag set in `on-workspace-switched`, cleared by timer
+- New Emacs frame fullscreen: must send configure with `Fullscreen` state + output size in `new_toplevel` (not defer to `handle_surface_commit`). Otherwise GTK renders first frame with CSD decorations at default size
+- `set-window-scroll-bars`/`set-window-fringes`/`set-window-margins` are non-persistent across frame creation — unconditionally reset to 0 in `sync-all` for EAF windows (not just when scroll-bar width is non-zero)
+- `emskin--last-focused-wid` must be reset to `'unset` on workspace switch — otherwise `sync-focus` skips re-sending `set_focus` when the same app was focused before the switch (compositor already reset focus to Emacs during `switch_workspace`)
+- `other-frame` (C-x 5 o) can't focus a GTK window in inactive workspace — advise `:before` to send `switch_workspace` IPC first so the compositor makes the target window's workspace active before GTK tries to focus it
+- Bar height transition (1↔2 workspaces): `resize_all_emacs_for_bar()` must resize ALL workspace Emacs frames (active + inactive) and re-send `SurfaceSize` IPC
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)
@@ -81,3 +95,4 @@
 - wp_cursor_shape_v1 (cursor shape forwarding to host — Named icons via winit, Surface falls back to default)
 - linux-dmabuf (GPU buffer sharing for hardware-accelerated clients)
 - wlr-layer-shell (layer surfaces for rofi/wofi launchers — uses LayerMap for layout, keyboard focus set on first commit not on surface creation)
+- ext-workspace-v1 (workspace management for external bars/clients — `protocols/workspace.rs`)

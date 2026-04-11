@@ -76,6 +76,17 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 (defvar emskin--next-view-id 0
   "Counter for generating unique mirror view IDs.")
 
+;; --- Workspace tracking ---
+(defvar emskin--frame-workspace-table (make-hash-table :test 'eq)
+  "Maps Emacs frame objects to compositor workspace IDs.")
+
+(defvar emskin--pending-frame-queue nil
+  "Frames awaiting workspace_created IPC confirmation (FIFO order).
+Use `nconc' to append and `pop' to dequeue from front.")
+
+(defvar emskin--active-workspace-id nil
+  "Currently active workspace ID in the compositor.")
+
 ;; ---------------------------------------------------------------------------
 ;; Socket discovery
 ;; ---------------------------------------------------------------------------
@@ -152,6 +163,9 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
     (cond
      ((string= type "connected")
       (message "emskin: connected (version %s)" (gethash "version" msg "?"))
+      ;; Initialize workspace tracking: initial frame = workspace 1.
+      (setq emskin--active-workspace-id 1)
+      (puthash (selected-frame) 1 emskin--frame-workspace-table)
       (when emskin-crosshair
         (emskin--send `((type . "set_crosshair") (enabled . t)))))
      ((string= type "error")
@@ -187,6 +201,12 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
                  kind
                  (if (string-empty-p label) "" (format " [%s]" label))
                  x y w h)))
+     ((string= type "workspace_created")
+      (emskin--on-workspace-created (gethash "workspace_id" msg)))
+     ((string= type "workspace_switched")
+      (emskin--on-workspace-switched (gethash "workspace_id" msg)))
+     ((string= type "workspace_destroyed")
+      (emskin--on-workspace-destroyed (gethash "workspace_id" msg)))
      (t
       (message "emskin: unknown message type %s" type)))))
 
@@ -198,10 +218,12 @@ VIEW-ID 0 means the source window; otherwise look up the mirror alist."
                    (if (= view-id 0)
                        (car state)
                      (cdr (assq view-id (cdr state)))))))
-    ;; Fallback for single-window case (no mirror-table entry).
-    (unless (and target (window-live-p target))
+    ;; Fallback: search current frame only to avoid cross-workspace switch.
+    (unless (and target (window-live-p target)
+                 (eq (window-frame target) (selected-frame)))
       (when-let ((buf (emskin--find-buffer window-id)))
-        (setq target (get-buffer-window buf t))))
+        ;; nil = search current frame only (not t = all frames).
+        (setq target (get-buffer-window buf nil))))
     (when (and target (window-live-p target))
       (select-window target))))
 
@@ -391,25 +413,38 @@ Covers the body area (excludes fringes, margins, header-line, mode-line)."
   "Send mirror geometry IPC for WID/VIEW-ID at Emacs WIN position."
   (let ((geo (emskin--window-geometry win)))
     (emskin--send `((type . ,msg-type)
-                        (window_id . ,wid)
-                        (view_id . ,view-id)
-                        (x . ,(nth 0 geo))
-                        (y . ,(nth 1 geo))
-                        (w . ,(nth 2 geo))
-                        (h . ,(nth 3 geo))))))
+                    (window_id . ,wid)
+                    (view_id . ,view-id)
+                    (x . ,(nth 0 geo))
+                    (y . ,(nth 1 geo))
+                    (w . ,(nth 2 geo))
+                    (h . ,(nth 3 geo))))))
+
+(defun emskin--frame-visible-p (frame)
+  "Whether FRAME is currently rendered by the compositor.
+Now: only the active workspace's frame.  Future (side-by-side):
+expand to include all on-screen frames."
+  (or (null emskin--active-workspace-id)      ; before workspace init
+      (eql (gethash frame emskin--frame-workspace-table)
+           emskin--active-workspace-id)))
 
 (defun emskin--sync-all (_frame)
   "Sync visibility, geometry, and mirrors for all EAF buffers."
-  ;; Pass 1: collect all Emacs windows showing each EAF buffer.
+  ;; Pass 1: collect Emacs windows showing each EAF buffer,
+  ;; but ONLY from visible frames (inactive workspace frames are skipped).
   ;; Key: window-id, Value: list of Emacs windows (in order found).
   (let ((wid-wins (make-hash-table :test 'eql)))
     (dolist (fr (frame-list))
-      (dolist (win (window-list fr 'no-minibuf))
-        (when-let ((wid (buffer-local-value 'emskin--window-id
-                                            (window-buffer win))))
-          (unless (zerop (or (car (window-scroll-bars win)) 0))
-            (set-window-scroll-bars win 0 nil 0 nil))
-          (puthash wid (append (gethash wid wid-wins) (list win)) wid-wins))))
+      (when (emskin--frame-visible-p fr)
+        (dolist (win (window-list fr 'no-minibuf))
+          (when-let ((wid (buffer-local-value 'emskin--window-id
+                                              (window-buffer win))))
+            ;; Unconditionally strip scroll-bars, fringes, margins for EAF
+            ;; windows — these are non-persistent across frame/buffer changes.
+            (set-window-scroll-bars win 0 nil 0 nil)
+            (set-window-fringes win 0 0)
+            (set-window-margins win 0 0)
+            (puthash wid (append (gethash wid wid-wins) (list win)) wid-wins)))))
     ;; Pass 2: for each EAF buffer, sync source + mirrors.
     (dolist (buf (buffer-list))
       (when-let ((wid (buffer-local-value 'emskin--window-id buf)))
@@ -643,6 +678,100 @@ otherwise focus Emacs.  Skips IPC when focus hasn't changed."
                         '((type . "set_focus"))))))))
 
 (add-hook 'window-selection-change-functions #'emskin--sync-focus)
+
+;; ---------------------------------------------------------------------------
+;; Workspace management (C-x 5 frame operations)
+;; ---------------------------------------------------------------------------
+
+(defun emskin--on-workspace-created (workspace-id)
+  "Associate the most recently created frame with WORKSPACE-ID."
+  (if emskin--pending-frame-queue
+      (let ((frame (pop emskin--pending-frame-queue)))
+        (when (frame-live-p frame)
+          (puthash frame workspace-id emskin--frame-workspace-table)
+          (message "emskin: frame → workspace %d" workspace-id)
+          ;; Sync immediately so scroll-bars are fixed and geometry is sent.
+          (emskin--sync-all frame)))
+    ;; No pending frame — this is the initial workspace for the current frame.
+    (puthash (selected-frame) workspace-id emskin--frame-workspace-table)))
+
+(defun emskin--on-workspace-switched (workspace-id)
+  "Update active workspace tracking and re-sync geometry."
+  (setq emskin--active-workspace-id workspace-id)
+  ;; Suppress after-focus-change to prevent feedback loop.
+  (setq emskin--workspace-switch-suppressed t)
+  (run-with-timer 0.3 nil (lambda () (setq emskin--workspace-switch-suppressed nil)))
+  ;; Reset focus guard so sync-focus re-sends set_focus even if the
+  ;; same app was focused before the switch (compositor reset focus
+  ;; to Emacs during switch_workspace).
+  (setq emskin--last-focused-wid 'unset)
+  ;; Sync immediately: workspace_created has already run (IPC order
+  ;; guarantees it), so the frame is registered in the workspace table.
+  (dolist (frame (frame-list))
+    (emskin--sync-all frame))
+  ;; Restore app focus.
+  (emskin--sync-focus (selected-window)))
+
+(defun emskin--on-workspace-destroyed (workspace-id)
+  "Clean up frame-workspace mapping for destroyed workspace."
+  (maphash (lambda (frame ws-id)
+             (when (eql ws-id workspace-id)
+               (remhash frame emskin--frame-workspace-table)))
+           emskin--frame-workspace-table))
+
+(defun emskin--after-make-frame (frame)
+  "Queue FRAME for workspace association when a non-child frame is created."
+  (when (and emskin--process
+             emskin--active-workspace-id
+             ;; Child frames have parent-frame parameter — don't queue.
+             (not (frame-parameter frame 'parent-frame)))
+    (setq emskin--pending-frame-queue
+          (nconc emskin--pending-frame-queue (list frame)))))
+
+(defvar emskin--workspace-switch-suppressed nil
+  "When non-nil, suppress workspace switch from after-focus-change.")
+
+(defun emskin--after-focus-change ()
+  "Detect frame switch and request compositor workspace switch."
+  (when (and emskin--process
+             (not emskin--workspace-switch-suppressed))
+    (let* ((frame (selected-frame))
+           (ws-id (gethash frame emskin--frame-workspace-table)))
+      (when (and ws-id
+                 (not (eql ws-id emskin--active-workspace-id)))
+        ;; Suppress further switches until this one completes.
+        (setq emskin--workspace-switch-suppressed t)
+        (emskin--send `((type . "switch_workspace")
+                        (workspace_id . ,ws-id)))
+        ;; Clear suppression after compositor has had time to process.
+        (run-with-timer 0.2 nil
+                        (lambda ()
+                          (setq emskin--workspace-switch-suppressed nil)))))))
+
+(defun emskin--delete-frame-hook (frame)
+  "Clean up workspace mapping when a frame is deleted."
+  (remhash frame emskin--frame-workspace-table))
+
+(defun emskin--advise-other-frame (&optional arg &rest _)
+  "Switch compositor workspace BEFORE Emacs tries to focus the other frame.
+Without this, GTK can't focus a window in an inactive workspace."
+  (when emskin--process
+    (let* ((n (or arg 1))
+           (target (let ((f (selected-frame)))
+                     (dotimes (_ (abs n))
+                       (setq f (if (> n 0) (next-frame f) (previous-frame f))))
+                     f))
+           (ws-id (gethash target emskin--frame-workspace-table)))
+      (when (and ws-id (not (eql ws-id emskin--active-workspace-id)))
+        (emskin--send `((type . "switch_workspace")
+                        (workspace_id . ,ws-id)))
+        (setq emskin--active-workspace-id ws-id)))))
+
+(advice-add 'other-frame :before #'emskin--advise-other-frame)
+
+(add-hook 'after-make-frame-functions #'emskin--after-make-frame)
+(add-function :after after-focus-change-function #'emskin--after-focus-change)
+(add-hook 'delete-frame-functions #'emskin--delete-frame-hook)
 
 ;; ---------------------------------------------------------------------------
 ;; Launch an embedded application

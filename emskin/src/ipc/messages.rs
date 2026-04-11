@@ -62,6 +62,10 @@ pub enum IncomingMessage {
         #[serde(default)]
         rects: Vec<SkeletonRect>,
     },
+    /// Request the compositor to switch to the given workspace.
+    SwitchWorkspace {
+        workspace_id: u64,
+    },
 }
 
 /// A single rectangle in the skeleton overlay. Emacs-side kinds currently
@@ -127,5 +131,17 @@ pub enum OutgoingMessage {
         y: i32,
         w: i32,
         h: i32,
+    },
+    /// A new workspace was created (new Emacs frame detected).
+    WorkspaceCreated {
+        workspace_id: u64,
+    },
+    /// The active workspace changed.
+    WorkspaceSwitched {
+        workspace_id: u64,
+    },
+    /// A workspace was destroyed (Emacs frame closed).
+    WorkspaceDestroyed {
+        workspace_id: u64,
     },
 }
