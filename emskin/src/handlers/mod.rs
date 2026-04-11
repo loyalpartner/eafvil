@@ -108,16 +108,27 @@ impl SelectionHandler for EmskinState {
         if let Some(source) = source {
             let mime_types = source.mime_types();
 
+            let ipc_connected = self.ipc.is_connected();
+            tracing::debug!(
+                "selection {ty:?}: ipc={ipc_connected} mimes={mime_types:?} age={:.1}s",
+                self.start_time.elapsed().as_secs_f32(),
+            );
+
             // Skip selections that arrive before Emacs IPC connects —
             // GTK/Emacs announces clipboard ownership on startup which
             // would clear the host clipboard. Real user copies only
             // happen after emskin.el connects.
-            if !self.ipc.is_connected() {
-                tracing::debug!("Skipping pre-IPC {ty:?} selection (startup)");
+            if !ipc_connected {
                 return;
             }
-
-            tracing::debug!("Internal selection set ({ty:?}): {mime_types:?}");
+            match ty {
+                SelectionTarget::Clipboard => {
+                    self.clipboard_origin = crate::state::SelectionOrigin::Wayland
+                }
+                SelectionTarget::Primary => {
+                    self.primary_origin = crate::state::SelectionOrigin::Wayland
+                }
+            }
             clipboard.set_host_selection(ty, &mime_types);
         } else {
             tracing::debug!("Internal selection cleared ({ty:?})");

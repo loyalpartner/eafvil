@@ -32,6 +32,15 @@ use smithay::{
     xwayland::X11Wm,
 };
 
+/// Tracks where the active selection came from, so host paste requests
+/// are routed to the correct source (Wayland data_device vs X11 XWM).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SelectionOrigin {
+    #[default]
+    Wayland,
+    X11,
+}
+
 pub struct PendingCommand {
     pub command: String,
     pub args: Vec<String>,
@@ -117,6 +126,16 @@ pub struct EmskinState {
 
     /// Clipboard synchronization proxy (Wayland or X11 backend, None if unavailable)
     pub clipboard: Option<crate::clipboard::HostClipboard>,
+
+    /// Where the current clipboard/primary selection came from.
+    /// Used to route host paste requests to the correct source.
+    pub clipboard_origin: SelectionOrigin,
+    pub primary_origin: SelectionOrigin,
+
+    /// Cached host selection mime types — replayed into XWM when it becomes ready
+    /// (the initial HostSelectionChanged event may fire before XWM is available).
+    pub host_clipboard_mimes: Vec<String>,
+    pub host_primary_mimes: Vec<String>,
 
     /// Saved keyboard focus before a prefix key redirect (C-x, C-c, M-x).
     /// `Some(focus)` = prefix active, restore `focus` when done; `None` = normal.
@@ -239,6 +258,10 @@ impl EmskinState {
             emacs_app_id: None,
             pending_command: None,
             clipboard: None,
+            clipboard_origin: SelectionOrigin::default(),
+            primary_origin: SelectionOrigin::default(),
+            host_clipboard_mimes: Vec::new(),
+            host_primary_mimes: Vec::new(),
             prefix_saved_focus: None,
             crosshair: crate::crosshair::CrosshairOverlay::new(),
             skeleton: crate::skeleton::SkeletonOverlay::new(),

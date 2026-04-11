@@ -57,6 +57,10 @@
 - Elisp skeleton: guard bar height fallback with `frame-parameter 'menu-bar-lines/tool-bar-lines/tab-bar-lines` — pgtk fallback incorrectly derives non-zero heights for disabled bars without this check
 - Popup input: clicking a popup surface must NOT change keyboard focus if the popup belongs to the same Wayland client as the current focus — `wl_keyboard.leave` on the parent toplevel causes Firefox/Chrome to dismiss the popup before processing the button event. Use `same_client_as()` guard before `keyboard.set_focus()`
 - Popup input: browsers (Firefox, Chrome) may open menus as `xdg_popup` WITHOUT requesting `xdg_popup.grab` — the compositor must handle ungrabbed popups via the normal pointer focus path (no `PopupPointerGrab`)
+- X11 clipboard: `XwmHandler::new_selection`/`send_selection`/`cleared_selection` are SEPARATE from `SelectionHandler::new_selection` — X11 clients go through XWM, Wayland clients go through data_device. Both paths must be implemented for clipboard to work with both pgtk and gtk3 Emacs
+- X11 clipboard routing: `SelectionOrigin` enum (Wayland/X11) tracks where the active selection came from. `forward_client_selection` routes host paste requests to the correct source — `request_data_device_client_selection` for Wayland, `X11Wm::send_selection` for X11. Must reset origin on `cleared_selection` and `SourceCancelled`
+- X11 clipboard injection: `inject_host_selection` must call `X11Wm::new_selection()` alongside `set_data_device_selection` so X11 clients can paste host content. Cache `host_clipboard_mimes`/`host_primary_mimes` and replay into XWM on ready (initial `HostSelectionChanged` fires before XWM exists)
+- Clipboard startup guard: use `!self.ipc.is_connected()` instead of per-target bool flags — GTK clipboard init happens before emskin.el connects, real user copies happen after. Works for both pgtk (SelectionHandler) and gtk3 (XwmHandler) paths
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)

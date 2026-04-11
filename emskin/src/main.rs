@@ -585,6 +585,27 @@ fn start_xwayland(
                     });
                     tracing::info!("XWayland ready on :{display_number}");
 
+                    // Replay cached host selections so X11 clients can paste
+                    // content that was set before XWM was ready.
+                    {
+                        use smithay::wayland::selection::SelectionTarget;
+                        let pairs = [
+                            (SelectionTarget::Clipboard, &state.host_clipboard_mimes),
+                            (SelectionTarget::Primary, &state.host_primary_mimes),
+                        ];
+                        for (target, mimes) in pairs {
+                            if !mimes.is_empty() {
+                                if let Some(ref mut xwm) = state.xwm {
+                                    if let Err(e) =
+                                        xwm.new_selection(target, Some(mimes.clone()))
+                                    {
+                                        tracing::warn!("X11 replay {target:?} failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Spawn child now that both WAYLAND_DISPLAY and DISPLAY are set.
                     if let Some(pc) = state.pending_command.take() {
                         spawn_child(&pc.command, &pc.args, display_number, pc.standalone, state);
@@ -662,6 +683,14 @@ fn handle_clipboard_event(state: &mut EmskinState, event: clipboard::ClipboardEv
         }
         ClipboardEvent::SourceCancelled { target } => {
             tracing::debug!("Host source cancelled ({target:?})");
+            match target {
+                smithay::wayland::selection::SelectionTarget::Clipboard => {
+                    state.clipboard_origin = crate::state::SelectionOrigin::default();
+                }
+                smithay::wayland::selection::SelectionTarget::Primary => {
+                    state.primary_origin = crate::state::SelectionOrigin::default();
+                }
+            }
         }
     }
 }
@@ -679,6 +708,12 @@ fn inject_host_selection(
     };
     use smithay::wayland::selection::SelectionTarget;
 
+    // Cache host mime types for replay when XWM becomes ready.
+    match target {
+        SelectionTarget::Clipboard => state.host_clipboard_mimes = mime_types.clone(),
+        SelectionTarget::Primary => state.host_primary_mimes = mime_types.clone(),
+    }
+
     if mime_types.is_empty() {
         tracing::debug!("Host {target:?} cleared");
         match target {
@@ -687,8 +722,18 @@ fn inject_host_selection(
             }
             SelectionTarget::Primary => clear_primary_selection(&state.display_handle, &state.seat),
         }
+        if let Some(ref mut xwm) = state.xwm {
+            if let Err(e) = xwm.new_selection(target, None) {
+                tracing::warn!("X11 clear {target:?} selection failed: {e}");
+            }
+        }
     } else {
         tracing::debug!("Host {target:?} changed ({} types)", mime_types.len());
+        if let Some(ref mut xwm) = state.xwm {
+            if let Err(e) = xwm.new_selection(target, Some(mime_types.clone())) {
+                tracing::warn!("X11 set {target:?} selection failed: {e}");
+            }
+        }
         match target {
             SelectionTarget::Clipboard => {
                 set_data_device_selection(&state.display_handle, &state.seat, mime_types, ())
@@ -752,16 +797,38 @@ fn forward_client_selection(
     use smithay::wayland::selection::primary_selection::request_primary_client_selection;
     use smithay::wayland::selection::SelectionTarget;
 
-    let result = match target {
-        SelectionTarget::Clipboard => {
-            request_data_device_client_selection(&state.seat, mime_type, fd)
-                .map_err(|e| format!("{e:?}"))
-        }
-        SelectionTarget::Primary => request_primary_client_selection(&state.seat, mime_type, fd)
-            .map_err(|e| format!("{e:?}")),
+    use crate::state::SelectionOrigin;
+
+    let origin = match target {
+        SelectionTarget::Clipboard => state.clipboard_origin,
+        SelectionTarget::Primary => state.primary_origin,
     };
-    if let Err(e) = result {
-        tracing::warn!("Failed to forward {target:?} selection to host: {e}");
+
+    match origin {
+        SelectionOrigin::Wayland => {
+            let result = match target {
+                SelectionTarget::Clipboard => {
+                    request_data_device_client_selection(&state.seat, mime_type, fd)
+                        .map_err(|e| format!("{e:?}"))
+                }
+                SelectionTarget::Primary => {
+                    request_primary_client_selection(&state.seat, mime_type, fd)
+                        .map_err(|e| format!("{e:?}"))
+                }
+            };
+            if let Err(e) = result {
+                tracing::warn!("Failed to forward {target:?} selection to host: {e}");
+            }
+        }
+        SelectionOrigin::X11 => {
+            if let Some(ref mut xwm) = state.xwm {
+                if let Err(e) = xwm.send_selection(target, mime_type, fd) {
+                    tracing::warn!("Failed to forward X11 {target:?} selection to host: {e}");
+                }
+            } else {
+                tracing::warn!("X11 {target:?} selection requested but XWM unavailable");
+            }
+        }
     }
 }
 
