@@ -462,6 +462,7 @@ fn spawn_child(
         .env("QT_QPA_PLATFORM", "wayland;xcb")
         .env("SDL_VIDEODRIVER", "wayland")
         .env("CLUTTER_BACKEND", "wayland")
+        .env("XDG_SESSION_DESKTOP", "emskin")
         .spawn()
     {
         Ok(child) => state.emacs_child = Some(child),
