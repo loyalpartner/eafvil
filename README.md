@@ -109,6 +109,22 @@ emskin [OPTIONS]
   --xkb-layout <LAYOUT>   键盘布局 (例: "us", "cn")
 ```
 
+## FAQ
+
+### 虚拟机里启动后闪退
+
+emskin 支持软件渲染（llvmpipe），但旧版本 Mesa（< 21.0）在高分辨率下可能崩溃。解决方法：
+
+```bash
+# 检查当前渲染器
+glxinfo | grep "OpenGL renderer"
+
+# 如果显示 llvmpipe 且分辨率过高，降低分辨率
+xrandr --output Virtual-1 --mode 1920x1080
+```
+
+确保安装了 mesa：`sudo pacman -S mesa mesa-utils`（Arch）或 `sudo apt install mesa-utils`（Debian/Ubuntu）。
+
 ## License
 
 GPL-3.0
