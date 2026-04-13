@@ -19,7 +19,7 @@ include_dir = "0.7"
 cosmic-text = "0.18"
 
 [dependencies.smithay]
-git = "https://github.com/loyalpartner/smithay.git"
+git = "https://github.com/emskin/smithay.git"
 branch = "emskin-patches"
 default-features = false
 features = [
