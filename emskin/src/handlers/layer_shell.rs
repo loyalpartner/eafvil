@@ -2,7 +2,7 @@ use smithay::{
     delegate_layer_shell,
     desktop::{layer_map_for_output, LayerSurface as DesktopLayerSurface, WindowSurfaceType},
     reexports::wayland_server::protocol::wl_output::WlOutput,
-    utils::SERIAL_COUNTER,
+    utils::{Size, SERIAL_COUNTER},
     wayland::shell::wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
 };
 
@@ -36,16 +36,34 @@ impl WlrLayerShellHandler for EmskinState {
         }
 
         tracing::info!(
-            "layer_shell: new surface, namespace={namespace} layer={:?}",
-            desktop_layer.layer(),
+            "layer_shell: new surface, namespace={namespace}",
         );
 
+        // map_layer() internally calls arrange() which uses cached_state.
+        // At this point cached_state has defaults (no anchors, 0×0), so
+        // arrange computed wrong geometry (half-output, centered).
+        //
+        // Override pending size with the full output size before sending
+        // the initial configure. This is correct for all-4-anchor surfaces
+        // (launchers, full-screen overlays) and unblocks clients whose
+        // event loop won't flush the initial wl_surface.commit until they
+        // receive a configure event. After the client's first commit,
+        // arrange() with correct cached_state sends the precise configure.
+        let output_logical_size = output
+            .current_mode()
+            .map(|mode| {
+                mode.size
+                    .to_f64()
+                    .to_logical(output.current_scale().fractional_scale())
+                    .to_i32_round()
+            })
+            .unwrap_or_else(|| Size::from((0, 0)));
+
+        desktop_layer.layer_surface().with_pending_state(|state| {
+            state.size = Some(output_logical_size);
+        });
         desktop_layer.layer_surface().send_pending_configure();
         drop(map);
-
-        // Keyboard focus is deferred to the compositor commit handler:
-        // new_layer_surface fires on get_layer_surface (before initial commit),
-        // so cached_state has no keyboard_interactivity yet.
     }
 
     fn layer_destroyed(&mut self, surface: LayerSurface) {

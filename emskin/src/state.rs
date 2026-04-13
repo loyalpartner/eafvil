@@ -350,6 +350,9 @@ impl EmskinState {
                             tracing::error!("dispatch_clients failed: {}", e);
                         }
                     }
+                    // Flush responses immediately so clients don't wait until
+                    // the next render frame for roundtrip replies (wl_display.sync).
+                    let _ = state.display_handle.flush_clients();
                     Ok(PostAction::Continue)
                 },
             )

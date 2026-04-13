@@ -1,9 +1,11 @@
+use std::time::Duration;
+
 use crate::{state::ClientState, EmskinState};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_shm,
-    desktop::{layer_map_for_output, WindowSurfaceType},
+    desktop::{layer_map_for_output, utils::send_frames_surface_tree, WindowSurfaceType},
     reexports::wayland_server::{
         protocol::{wl_buffer, wl_surface::WlSurface},
         Client,
@@ -75,8 +77,11 @@ impl CompositorHandler for EmskinState {
                 .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
                 .cloned();
             if let Some(ref layer) = layer {
-                map.arrange();
+                let changed = map.arrange();
                 drop(map);
+                if changed {
+                    tracing::debug!("layer surface rearranged");
+                }
                 layer.layer_surface().send_pending_configure();
 
                 let needs_focus = layer.can_receive_keyboard_focus();
@@ -102,6 +107,27 @@ impl CompositorHandler for EmskinState {
         }
 
         xdg_shell::handle_surface_commit(&mut self.popups, &self.space, surface);
+
+        // Fire frame callbacks for surfaces not tracked in space or layer map
+        // (e.g., temporary Vulkan test surfaces created during GPU init).
+        // Without this, Vulkan WSI's vkQueuePresentKHR stalls waiting for
+        // wl_surface.frame callbacks that never arrive.
+        let is_space_element = self
+            .space
+            .elements()
+            .any(|w| w.wl_surface().map_or(false, |s| *s == *surface));
+        if !is_space_element {
+            tracing::trace!("untracked surface commit: {surface:?}");
+            if let Some(output) = self.space.outputs().next() {
+                send_frames_surface_tree(
+                    surface,
+                    output,
+                    self.start_time.elapsed(),
+                    Some(Duration::ZERO),
+                    |_, _| None,
+                );
+            }
+        }
     }
 }
 
