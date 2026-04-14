@@ -163,6 +163,25 @@ impl AppManager {
         result
     }
 
+    /// Test if `pos` hits a mirror region and map to source surface coordinates.
+    /// Returns mapped point if hit, None otherwise.
+    pub fn mirror_hit_test(
+        pos: smithay::utils::Point<f64, Logical>,
+        source_geo: Rectangle<i32, Logical>,
+        mirror_geo: Rectangle<i32, Logical>,
+    ) -> Option<smithay::utils::Point<f64, Logical>> {
+        let src_size = source_geo.size.to_f64();
+        let m = mirror_geo.to_f64();
+        let ratio = Self::aspect_fit_ratio(src_size, m.size)?;
+        let fit: smithay::utils::Size<f64, Logical> =
+            (src_size.w * ratio, src_size.h * ratio).into();
+        let rel = pos - m.loc;
+        if rel.x < 0.0 || rel.y < 0.0 || rel.x >= fit.w || rel.y >= fit.h {
+            return None;
+        }
+        Some(source_geo.loc.to_f64() + rel.downscale(ratio))
+    }
+
     /// Compute the aspect-fit scale ratio for rendering `src_size` inside `dst_size`.
     /// Returns `None` if either dimension is zero.
     pub fn aspect_fit_ratio(
@@ -187,27 +206,13 @@ impl AppManager {
             let Some(source_geo) = app.geometry else {
                 continue;
             };
-            let src_size = source_geo.size.to_f64();
-
             for (&view_id, mirror) in &app.mirrors {
                 if mirror.workspace_id != active_workspace_id {
                     continue;
                 }
-                let m = mirror.geometry.to_f64();
-                let Some(ratio) = Self::aspect_fit_ratio(src_size, m.size) else {
-                    continue;
-                };
-                let fit: smithay::utils::Size<f64, Logical> =
-                    (src_size.w * ratio, src_size.h * ratio).into();
-                let rel = pos - m.loc;
-
-                // Only respond within the rendered content area (top-left aligned).
-                if rel.x < 0.0 || rel.y < 0.0 || rel.x >= fit.w || rel.y >= fit.h {
-                    continue;
+                if let Some(mapped) = Self::mirror_hit_test(pos, source_geo, mirror.geometry) {
+                    return Some((app.window_id, view_id, mapped));
                 }
-
-                let mapped = source_geo.loc.to_f64() + rel.downscale(ratio);
-                return Some((app.window_id, view_id, mapped));
             }
         }
         None
@@ -303,5 +308,95 @@ mod tests {
         let id3 = mgr.alloc_id();
         assert_eq!(id2, id1 + 1);
         assert_eq!(id3, id2 + 1);
+    }
+
+    // --- mirror_hit_test ---
+
+    use smithay::utils::{Point, Rectangle};
+
+    fn src_geo(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    #[test]
+    fn mirror_hit_test_center_of_equal_size_mirror() {
+        // Source: 100x100 at (0,0). Mirror: 100x100 at (200,200).
+        // Click at center of mirror (250, 250) → maps to source (50, 50).
+        let source = src_geo(0, 0, 100, 100);
+        let mirror = src_geo(200, 200, 100, 100);
+        let pos: Point<f64, Logical> = (250.0, 250.0).into();
+        let mapped = AppManager::mirror_hit_test(pos, source, mirror).unwrap();
+        assert!((mapped.x - 50.0).abs() < 0.01);
+        assert!((mapped.y - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn mirror_hit_test_scaled_down_mirror() {
+        // Source: 200x100 at (10,20). Mirror: 100x50 at (0,0) (ratio=0.5).
+        // Click at (50, 25) → rel=(50,25) → downscale by 0.5 → (100,50) → + source.loc → (110,70).
+        let source = src_geo(10, 20, 200, 100);
+        let mirror = src_geo(0, 0, 100, 50);
+        let pos: Point<f64, Logical> = (50.0, 25.0).into();
+        let mapped = AppManager::mirror_hit_test(pos, source, mirror).unwrap();
+        assert!((mapped.x - 110.0).abs() < 0.01);
+        assert!((mapped.y - 70.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn mirror_hit_test_miss_outside_left() {
+        let source = src_geo(0, 0, 100, 100);
+        let mirror = src_geo(100, 100, 100, 100);
+        let pos: Point<f64, Logical> = (99.0, 150.0).into(); // left of mirror
+        assert!(AppManager::mirror_hit_test(pos, source, mirror).is_none());
+    }
+
+    #[test]
+    fn mirror_hit_test_miss_outside_bottom() {
+        let source = src_geo(0, 0, 100, 100);
+        let mirror = src_geo(100, 100, 100, 100);
+        let pos: Point<f64, Logical> = (150.0, 200.0).into(); // at bottom edge (exclusive)
+        assert!(AppManager::mirror_hit_test(pos, source, mirror).is_none());
+    }
+
+    #[test]
+    fn mirror_hit_test_hit_at_origin() {
+        let source = src_geo(0, 0, 100, 100);
+        let mirror = src_geo(50, 50, 100, 100);
+        let pos: Point<f64, Logical> = (50.0, 50.0).into(); // top-left of mirror
+        let mapped = AppManager::mirror_hit_test(pos, source, mirror).unwrap();
+        assert!((mapped.x - 0.0).abs() < 0.01);
+        assert!((mapped.y - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn mirror_hit_test_aspect_fit_letterbox() {
+        // Source: 200x100. Mirror: 100x100 (wider than needed).
+        // Aspect fit: ratio = min(100/200, 100/100) = 0.5.
+        // Fitted size: 100x50 (letterboxed, top-left aligned).
+        // Click at (50, 25) → rel=(50,25), within (100,50) → mapped = (0,0)+(100,50) = (100,50).
+        let source = src_geo(0, 0, 200, 100);
+        let mirror = src_geo(0, 0, 100, 100);
+        let pos: Point<f64, Logical> = (50.0, 25.0).into();
+        let mapped = AppManager::mirror_hit_test(pos, source, mirror).unwrap();
+        assert!((mapped.x - 100.0).abs() < 0.01);
+        assert!((mapped.y - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn mirror_hit_test_miss_in_letterbox_area() {
+        // Source: 200x100. Mirror: 100x100. Fitted: 100x50.
+        // Click at (50, 60) → rel.y=60 >= fit.h=50 → miss (in letterbox padding).
+        let source = src_geo(0, 0, 200, 100);
+        let mirror = src_geo(0, 0, 100, 100);
+        let pos: Point<f64, Logical> = (50.0, 60.0).into();
+        assert!(AppManager::mirror_hit_test(pos, source, mirror).is_none());
+    }
+
+    #[test]
+    fn mirror_hit_test_zero_size_source_returns_none() {
+        let source = src_geo(0, 0, 0, 100);
+        let mirror = src_geo(0, 0, 100, 100);
+        let pos: Point<f64, Logical> = (50.0, 50.0).into();
+        assert!(AppManager::mirror_hit_test(pos, source, mirror).is_none());
     }
 }
