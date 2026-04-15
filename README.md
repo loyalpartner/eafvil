@@ -34,6 +34,12 @@ pgtk Emacs (`--with-pgtk`) is recommended. GTK3 X11 Emacs also works via XWaylan
 
 ## Install
 
+**Requires Rust ≥ 1.89** (`rust-toolchain.toml` pins 1.92.0). If your distro ships an older rustc, install via [rustup](https://rustup.rs/):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
 ```bash
 # Dependencies (Arch Linux)
 sudo pacman -S wayland libxkbcommon mesa
