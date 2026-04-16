@@ -58,6 +58,10 @@ pub enum IncomingMessage {
     SetMeasure {
         enabled: bool,
     },
+    /// Enable/disable the cursor trail effect.
+    SetCursorTrail {
+        enabled: bool,
+    },
     /// Set (and enable/disable) the skeleton overlay (frame layout inspector).
     /// When `enabled` is false, `rects` is ignored and the overlay is cleared.
     SetSkeleton {
@@ -263,6 +267,16 @@ mod tests {
         let json = r#"{"type":"set_measure","enabled":true}"#;
         let msg: IncomingMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, IncomingMessage::SetMeasure { enabled: true }));
+    }
+
+    #[test]
+    fn parses_set_cursor_trail() {
+        let json = r#"{"type":"set_cursor_trail","enabled":true}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            IncomingMessage::SetCursorTrail { enabled: true }
+        ));
     }
 
     #[test]
