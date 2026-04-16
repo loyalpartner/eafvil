@@ -479,16 +479,11 @@ fn render_text_buf(
     let bw = (tw + PAD * 2).max(1);
     let bh = (th + PAD * 2).max(1);
 
-    let mut ctx = buf.render();
-    ctx.resize((bw, bh));
-    ctx.draw(|data| {
+    let buf_size: Size<i32, SBuffer> = (bw, bh).into();
+    crate::utils::paint_buffer(buf, buf_size, |data| {
         data.fill(0);
         crate::utils::draw_text_onto(data, bw, bh, PAD, PAD, fg, &mut ct, fs, cache);
-        Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::<i32, SBuffer>::from((
-            bw, bh,
-        )))])
-    })
-    .expect("splash text draw");
+    });
     commit.increment();
 
     (bw, bh)

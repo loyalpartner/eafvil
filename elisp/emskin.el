@@ -16,16 +16,17 @@
   :type '(choice (const nil) string)
   :group 'emskin)
 
-(defcustom emskin-crosshair nil
-  "Non-nil to enable the crosshair overlay (caliper tool).
-Shows crosshair lines and coordinates at the cursor position."
+(defcustom emskin-measure nil
+  "Non-nil to enable the measure overlay (Figma-style pixel inspector).
+Shows a crosshair, coordinates label, and ruler strips on the
+top/left edges of the output."
   :type 'boolean
   :group 'emskin
   :initialize #'custom-initialize-default
   :set (lambda (sym val)
          (set-default sym val)
          (when (bound-and-true-p emskin--process)
-           (emskin--send `((type . "set_crosshair")
+           (emskin--send `((type . "set_measure")
                                (enabled . ,(if val t :json-false)))))))
 
 (defcustom emskin-skeleton nil
@@ -109,10 +110,10 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 ;; Public API: launch apps
 ;; ---------------------------------------------------------------------------
 
-(defun emskin-toggle-crosshair ()
-  "Toggle the crosshair overlay (caliper tool)."
+(defun emskin-toggle-measure ()
+  "Toggle the measure overlay (crosshair + rulers)."
   (interactive)
-  (customize-set-variable 'emskin-crosshair (not emskin-crosshair)))
+  (customize-set-variable 'emskin-measure (not emskin-measure)))
 
 (defun emskin-open-app (app-name)
   "Launch embedded application APP-NAME (Python script in `emskin-demo-dir')."

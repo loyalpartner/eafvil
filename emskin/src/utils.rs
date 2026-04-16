@@ -1,5 +1,10 @@
+use std::convert::Infallible;
+
 use cosmic_text::{Buffer as CtBuffer, Color as CtColor, FontSystem, SwashCache};
-use smithay::utils::{Coordinate, Size};
+use smithay::{
+    backend::renderer::element::memory::MemoryRenderBuffer,
+    utils::{Buffer, Coordinate, Rectangle, Size},
+};
 
 pub(crate) trait SizeExt<N: Coordinate, Kind> {
     fn at_least(self, min: impl Into<Size<N, Kind>>) -> Size<N, Kind>;
@@ -10,6 +15,22 @@ impl<N: Coordinate, Kind> SizeExt<N, Kind> for Size<N, Kind> {
         let min = min.into();
         (self.w.max(min.w), self.h.max(min.h)).into()
     }
+}
+
+/// Resize `buf` to `size`, fill its bytes via `paint`, and emit full-buffer
+/// damage. Standardizes the overlay draw pattern and hides the `Infallible`
+/// error plumbing that every `MemoryRenderBuffer::draw` call needs.
+pub(crate) fn paint_buffer<F>(buf: &mut MemoryRenderBuffer, size: Size<i32, Buffer>, paint: F)
+where
+    F: FnOnce(&mut [u8]),
+{
+    let mut ctx = buf.render();
+    ctx.resize((size.w, size.h));
+    ctx.draw(|data| {
+        paint(data);
+        Ok::<_, Infallible>(vec![Rectangle::from_size(size)])
+    })
+    .unwrap();
 }
 
 /// Alpha-blend cosmic-text glyphs onto a BGRA pixel buffer (Fourcc::Argb8888

@@ -8,7 +8,7 @@
 ## Architecture
 - Nested Wayland compositor using smithay, hosting Emacs inside a winit window
 - First toplevel = Emacs (fullscreen), subsequent toplevels = **arbitrary embedded programs** (any Wayland or XWayland client) managed by AppManager. Not limited to EAF — any GTK/Qt/Electron/X11 app can be embedded as a child window whose geometry is controlled by Emacs via IPC.
-- IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, prefix_done, set_focus, set_crosshair, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed, focus_view, xwayland_ready
+- IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, prefix_done, set_focus, set_measure, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed, focus_view, xwayland_ready
 - Elisp client: split across `elisp/emskin.el` (entry + shared state), `emskin-ipc.el` (codec + connection), `emskin-app.el` (app lifecycle + geometry + mirrors + dispatch), `emskin-workspace.el` (workspace CRUD + frame mapping), `emskin-skeleton.el` (skeleton overlay). Auto-connects via parent PID socket discovery. All files are embedded into the binary via `include_dir!` and extracted at runtime in standalone mode
 - Mirror system: same embedded program displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `emskin--mirror-table`
 - Keyboard input: compositor detects Emacs prefix keys (C-x, C-c, M-x) via `input_intercept`, redirects focus to Emacs; `prefix_done` IPC restores focus. `set_focus` IPC for explicit focus control. Prefix state: `Option<Option<WlSurface>>` (outer None = inactive)
@@ -35,6 +35,8 @@
 - ClipboardBackend trait: replaces HostClipboard enum dispatch. `ClipboardProxy` (Wayland) and `X11ClipboardProxy` both impl the trait. State field: `Option<Box<dyn ClipboardBackend>>`
 - IpcRect: shared `{x, y, w, h}` struct with `#[serde(flatten)]` — replaces repeated bare fields in SetGeometry, AddMirror, UpdateMirrorGeometry, SkeletonClicked, SkeletonRect
 - Module layout: `lib.rs` (library entry), `tick.rs` (event loop body), `ipc/dispatch.rs` (IPC message handlers), `clipboard_dispatch.rs` (clipboard event bridge), `mirror_render.rs` (mirror texture rendering)
+- Overlay rendering: all 4 overlays (`measure`, `skeleton`, `splash`, `workspace_bar`) render into `MemoryRenderBuffer` via `utils::paint_buffer(buf, size, |data| ...)` — handles `render + resize + draw + Infallible unwrap` uniformly. `build_elements` on each overlay takes `(renderer, output_size: Size<i32, Logical>, scale: f64, ...)`; `measure` additionally takes cursor position.
+- Measure overlay (`measure.rs`): Figma-style pixel inspector — crosshair lines, cursor coord label, top/left ruler strips with 10/50/100 tick spacing. Enabled via `set_measure` IPC / `M-x emskin-toggle-measure`. Rulers cached in per-output-size `MemoryRenderBuffer`s and rebuilt only on output-size change; `label_size` cached on cursor move to skip per-frame `format!`
 
 ## Key Gotchas
 - smithay winit backend defaults to 10-10-10-2 pixel format (2-bit alpha) — breaks GTK semi-transparent UI. Fixed by prioritizing 8-bit in smithay's `backend/winit/mod.rs`
@@ -89,6 +91,10 @@
 - `emskin--last-focused-wid` must be reset to `'unset` on workspace switch — otherwise `sync-focus` skips re-sending `set_focus` when the same app was focused before the switch (compositor already reset focus to Emacs during `switch_workspace`)
 - `other-frame` (C-x 5 o): advised `:around` to send `switch_workspace` IPC before calling original. Does NOT resync after — `on-workspace-switched` handles it when compositor confirms
 - Bar height transition (1↔2 workspaces): `resize_all_emacs_for_bar()` must resize ALL workspace Emacs frames (active + inactive) and re-send `SurfaceSize` IPC
+- Buffer-space coordinates: anything writing into a `MemoryRenderBuffer` uses `Point<i32, Buffer>` / `Size<i32, Buffer>` smithay markers, not raw `i32` — prevents mixing Logical/Physical/Buffer in pixel-write hot paths (see `measure::draw_text`, `utils::paint_buffer`)
+- Release workflow: `emskin/Cargo.toml` `version` MUST equal the git tag minus the `v` prefix — `cargo aur` bakes `pkgver` into the PKGBUILD source URL (`releases/download/v$pkgver/...`). Mismatch → AUR PKGBUILD downloads a stale/missing tarball. Bump Cargo.toml version before tagging
+- AUR publish action pinned to `KSXGitHub/github-actions-deploy-aur@v4.1.2` or newer — v4.1.1 breaks on recent Arch `util-linux` with `bash: --command: invalid option`
+- Verifying AUR state: `https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=<pkg>` is cached — use `git clone https://aur.archlinux.org/<pkg>.git` to read the actual repo head
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)

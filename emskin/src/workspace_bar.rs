@@ -370,9 +370,8 @@ fn render_pill_button(
 
     let fg = if active { ACTIVE_FG } else { INACTIVE_FG };
 
-    let mut ctx = buf.render();
-    ctx.resize((buf_w, buf_h));
-    ctx.draw(|data| {
+    let buf_size: Size<i32, SBuffer> = (buf_w, buf_h).into();
+    crate::utils::paint_buffer(buf, buf_size, |data| {
         data.fill(0);
         if active {
             draw_rounded_rect(data, buf_w, buf_h, PILL_RADIUS, &PILL_BG);
@@ -389,12 +388,7 @@ fn render_pill_button(
             font_system,
             swash_cache,
         );
-
-        Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::<i32, SBuffer>::from((
-            buf_w, buf_h,
-        )))])
-    })
-    .expect("MemoryRenderBuffer draw with Infallible error type");
+    });
 
     (buf_w, buf_h)
 }
@@ -416,9 +410,8 @@ fn render_text_label(
     let buf_w = (text_w + TEXT_LABEL_PAD * 2).max(1);
     let buf_h = (text_h + TEXT_LABEL_PAD * 2).max(1);
 
-    let mut ctx = buf.render();
-    ctx.resize((buf_w, buf_h));
-    ctx.draw(|data| {
+    let buf_size: Size<i32, SBuffer> = (buf_w, buf_h).into();
+    crate::utils::paint_buffer(buf, buf_size, |data| {
         data.fill(0);
         draw_text_onto(
             data,
@@ -431,12 +424,7 @@ fn render_text_label(
             font_system,
             swash_cache,
         );
-
-        Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::<i32, SBuffer>::from((
-            buf_w, buf_h,
-        )))])
-    })
-    .expect("MemoryRenderBuffer draw with Infallible error type");
+    });
 
     (buf_w, buf_h)
 }

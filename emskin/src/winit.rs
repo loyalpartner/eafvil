@@ -162,7 +162,7 @@ fn render_frame(
         //   2. Splash screen (startup banner — fades out when Emacs connects)
         //   3. Workspace bar
         //   4. Skeleton labels / borders (debug overlay)
-        //   5. Crosshair label + lines (debug overlay)
+        //   5. Measure overlay: cursor label + crosshair + rulers
         //   6. Layer shell surfaces (Overlay → Top → Bottom → Background)
         //   7. Mirror texture elements (popups → toplevel)
         let scale = output.current_scale().fractional_scale();
@@ -261,17 +261,21 @@ fn render_frame(
             custom_elements.push(s.into());
         }
 
-        // Crosshair: above layer surfaces, below skeleton.
+        // Measure overlay: above layer surfaces, below skeleton.
+        // Order: cursor label (top) → crosshair lines → rulers (bottom).
         if let Some(pointer) = state.seat.get_pointer() {
             let cursor = pointer.current_location();
-            let (solids, label) = state
-                .crosshair
-                .build_elements(renderer, cursor, size, scale);
-            if let Some(l) = label {
+            let elements = state
+                .measure
+                .build_elements(renderer, cursor, output_size_log, scale);
+            if let Some(l) = elements.cursor_label {
                 custom_elements.push(l.into());
             }
-            for s in solids {
+            for s in elements.lines {
                 custom_elements.push(s.into());
+            }
+            for r in elements.rulers {
+                custom_elements.push(r.into());
             }
         }
 

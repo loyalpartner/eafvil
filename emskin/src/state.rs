@@ -198,8 +198,8 @@ pub struct EmskinState {
     /// Focus management state.
     pub focus: FocusState,
 
-    /// Crosshair overlay (caliper tool).
-    pub crosshair: crate::crosshair::CrosshairOverlay,
+    /// Measure overlay: crosshair + rulers, Figma-style pixel inspector.
+    pub measure: crate::measure::MeasureOverlay,
 
     /// Skeleton overlay (frame layout inspector).
     pub skeleton: crate::skeleton::SkeletonOverlay,
@@ -328,7 +328,7 @@ impl EmskinState {
             pending_command: None,
             selection: SelectionState::default(),
             focus: FocusState::default(),
-            crosshair: crate::crosshair::CrosshairOverlay::new(),
+            measure: crate::measure::MeasureOverlay::new(),
             skeleton: crate::skeleton::SkeletonOverlay::new(),
             skeleton_click_absorbed: false,
             cursor_status: CursorImageStatus::default_named(),

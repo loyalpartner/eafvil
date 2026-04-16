@@ -495,11 +495,9 @@ fn render_label(
     let buf_w = (inner_w + LABEL_PAD * 2).max(1);
     let buf_h = (inner_h + LABEL_PAD * 2).max(1);
 
-    let mut ctx = buf.render();
-    ctx.resize((buf_w, buf_h));
-    ctx.draw(|data| {
+    let buf_size: Size<i32, SBuffer> = (buf_w, buf_h).into();
+    crate::utils::paint_buffer(buf, buf_size, |data| {
         let stride = buf_w * 4;
-        // Fill background.
         data.chunks_exact_mut(4)
             .for_each(|c| c.copy_from_slice(&LABEL_BG));
 
@@ -538,12 +536,7 @@ fn render_label(
                 }
             },
         );
-
-        Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(Size::<i32, SBuffer>::from((
-            buf_w, buf_h,
-        )))])
-    })
-    .unwrap();
+    });
 
     (buf_w, buf_h)
 }

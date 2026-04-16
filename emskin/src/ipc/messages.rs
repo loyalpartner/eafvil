@@ -54,8 +54,8 @@ pub enum IncomingMessage {
         #[serde(default)]
         window_id: Option<u64>,
     },
-    /// Enable/disable the crosshair overlay (caliper tool).
-    SetCrosshair {
+    /// Enable/disable the measure overlay (crosshair + rulers).
+    SetMeasure {
         enabled: bool,
     },
     /// Set (and enable/disable) the skeleton overlay (frame layout inspector).
@@ -273,13 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_set_crosshair() {
-        let json = r#"{"type":"set_crosshair","enabled":true}"#;
+    fn parses_set_measure() {
+        let json = r#"{"type":"set_measure","enabled":true}"#;
         let msg: IncomingMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            msg,
-            IncomingMessage::SetCrosshair { enabled: true }
-        ));
+        assert!(matches!(msg, IncomingMessage::SetMeasure { enabled: true }));
     }
 
     #[test]

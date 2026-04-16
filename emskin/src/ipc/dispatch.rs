@@ -38,9 +38,9 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
         IncomingMessage::SetFocus { window_id } => {
             ipc_set_focus(state, window_id);
         }
-        IncomingMessage::SetCrosshair { enabled } => {
-            tracing::debug!("IPC set_crosshair enabled={enabled}");
-            state.crosshair.enabled = enabled;
+        IncomingMessage::SetMeasure { enabled } => {
+            tracing::debug!("IPC set_measure enabled={enabled}");
+            state.measure.enabled = enabled;
         }
         IncomingMessage::SetSkeleton { enabled, rects } => {
             tracing::debug!("IPC set_skeleton enabled={enabled} rects={}", rects.len());
