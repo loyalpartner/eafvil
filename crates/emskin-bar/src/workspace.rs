@@ -9,7 +9,7 @@
 //! Workspace IDs on the wire are strings like `"emskin-ws-3"` — we peel the
 //! prefix off to recover the numeric id the rest of the codebase uses.
 
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{event_created_child, Connection, Dispatch, QueueHandle};
 use wayland_protocols::ext::workspace::v1::client::ext_workspace_group_handle_v1::{
     self, ExtWorkspaceGroupHandleV1,
 };
@@ -19,6 +19,13 @@ use wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1::{
 use wayland_protocols::ext::workspace::v1::client::ext_workspace_manager_v1::{
     self, ExtWorkspaceManagerV1,
 };
+
+// Opcode constants from ext-workspace-v1.xml. wayland-protocols doesn't
+// export `EVT_*` constants for staging protocols, so we declare them here.
+/// Opcode for `ext_workspace_manager_v1.workspace_group` (creates group handle).
+const MANAGER_EVT_WORKSPACE_GROUP: u16 = 0;
+/// Opcode for `ext_workspace_manager_v1.workspace` (creates workspace handle).
+const MANAGER_EVT_WORKSPACE: u16 = 1;
 
 use crate::state::BarState;
 
@@ -60,6 +67,14 @@ fn parse_id(wire: &str) -> u64 {
 // =========================================================================
 
 impl Dispatch<ExtWorkspaceManagerV1, ()> for BarState {
+    // `workspace_group` and `workspace` events carry a new_id — wayland-client
+    // requires us to declare the UserData for the newly-created child proxy
+    // or it panics at dispatch time.
+    event_created_child!(BarState, ExtWorkspaceManagerV1, [
+        MANAGER_EVT_WORKSPACE_GROUP => (ExtWorkspaceGroupHandleV1, ()),
+        MANAGER_EVT_WORKSPACE => (ExtWorkspaceHandleV1, ()),
+    ]);
+
     fn event(
         state: &mut Self,
         _proxy: &ExtWorkspaceManagerV1,
