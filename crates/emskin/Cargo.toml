@@ -1,0 +1,40 @@
+[package]
+name = "emskin"
+# NOTE: cargo-aur (0.x) does not understand `version.workspace = true`.
+# Keep these as literal values until cargo-aur gains workspace-inheritance
+# support, then migrate them back to `.workspace = true`.
+version = "0.1.4"
+edition = "2021"
+authors = ["Lee <loyalpartner@163.com>"]
+license = "GPL-3.0"
+repository = "https://github.com/emskin/emskin"
+description = "Nested Wayland compositor for Emacs"
+
+[dependencies]
+effect-core = { path = "../effect-core" }
+effect-plugins = { path = "../effect-plugins" }
+smithay.workspace = true
+cosmic-text.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+bitflags = "2.2.1"
+winit_crate = { package = "winit", version = "0.30", default-features = false }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "server", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+include_dir = "0.7"
+
+[package.metadata.aur]
+depends = ["wayland", "libxkbcommon", "libxkbcommon-x11", "mesa", "libinput", "seatd", "fontconfig", "freetype2", "xorg-xwayland"]
+optdepends = ["emacs-wayland: pgtk Emacs (recommended)", "emacs: X11 Emacs (works via XWayland)"]
+files = [
+    ["assets/emskin.desktop", "/usr/share/applications/emskin.desktop"],
+    ["assets/emskin.png", "/usr/share/pixmaps/emskin.png"],
+    # Sibling workspace binary. The release workflow pre-builds emskin-bar
+    # and copies it into this crate's dir so cargo-aur can find it.
+    ["emskin-bar", "/usr/bin/emskin-bar"],
+]
