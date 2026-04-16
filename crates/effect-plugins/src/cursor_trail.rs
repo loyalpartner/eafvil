@@ -211,7 +211,8 @@ impl effect_core::Effect for CursorTrail {
         let now = ctx.present_time;
         let dt = self
             .last_time
-            .map(|prev| (now - prev).as_secs_f64())
+            .and_then(|prev| now.checked_sub(prev))
+            .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         self.last_time = Some(now);
 

@@ -270,6 +270,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_set_cursor_trail() {
+        let json = r#"{"type":"set_cursor_trail","enabled":true}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            IncomingMessage::SetCursorTrail { enabled: true }
+        ));
+    }
+
+    #[test]
     fn parses_set_skeleton_with_rects() {
         let json = r#"{"type":"set_skeleton","enabled":true,"rects":[{"kind":"window","x":0,"y":0,"w":100,"h":50}]}"#;
         let msg: IncomingMessage = serde_json::from_str(json).unwrap();
