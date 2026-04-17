@@ -14,11 +14,14 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
-          # Config + manifest live at repo root. When commits since the
-          # last tag arrive on main, this action either (a) opens/updates
-          # a Release PR bumping versions + CHANGELOG, or (b) on merge of
-          # that PR, creates the git tag + GitHub Release. The existing
-          # release.yml still fires on tag push and publishes the tarball
-          # to AUR — no change needed there.
+          # PAT (Personal Access Token) instead of the default GITHUB_TOKEN.
+          # Two reasons:
+          #   1. GITHUB_TOKEN occasionally fails silently when creating the
+          #      tag/release (we've seen "Expected 1 releases, only found 0"
+          #      with GITHUB_TOKEN). PAT exercises a different API path.
+          #   2. Tags pushed by GITHUB_TOKEN do NOT trigger downstream
+          #      workflows, so release.yml's `push: tags` would never fire.
+          #      PAT-authored tags do trigger them — closes the automation loop.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
