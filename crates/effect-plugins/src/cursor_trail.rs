@@ -139,7 +139,7 @@ impl CursorTrail {
         }
 
         Self {
-            enabled: false,
+            enabled: true,
             nodes: vec![Node::default(); NODE_COUNT],
             last_time: None,
             circle_bufs,

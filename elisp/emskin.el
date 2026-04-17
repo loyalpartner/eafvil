@@ -119,7 +119,9 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
   (interactive)
   (customize-set-variable 'emskin-measure (not emskin-measure)))
 
-(defvar emskin--cursor-trail nil)
+(defvar emskin--cursor-trail t
+  "Whether the cursor trail effect is on.
+Matches the compositor's default (enabled on startup).")
 
 (defun emskin-toggle-cursor-trail ()
   "Toggle the cursor trail effect."
