@@ -1,55 +1,28 @@
-;;; emskin-jelly.el --- Jelly text-cursor animation for emskin  -*- lexical-binding: t; -*-
+;;; emskin-jelly.el --- Jelly text-cursor animation  -*- lexical-binding: t; -*-
 
-;; Reports Emacs's text-cursor rectangle to the emskin compositor on every
-;; `post-command-hook' tick.  The compositor renders a 200 ms jelly
-;; animation from the previous rect to the new one.
-;;
 ;; Algorithm ported from holo-layer's `holo-layer-get-cursor-info' — pure
-;; elisp + IPC, no Wayland protocol dependency (pgtk does not broadcast
-;; caret position via `text_input_v3' reliably).
+;; elisp + IPC, no Wayland `text_input_v3' dependency (pgtk doesn't
+;; broadcast caret position on that channel reliably when an IM like
+;; fcitx intercepts the GTK IM context).
 
 ;;; Code:
 
-(require 'cl-lib)
+(require 'emskin-ipc)
 (require 'emskin-app)  ; emskin--frame-header-offset
 
-(declare-function emskin--send "emskin-ipc")
+(defvar emskin-jelly-cursor)
+(defvar emskin-jelly-fallback-color)
 
-(defgroup emskin-jelly nil
-  "Jelly text-cursor animation for emskin."
-  :prefix "emskin-jelly-"
-  :group 'emskin)
-
-(defcustom emskin-jelly-cursor t
-  "Non-nil to enable the jelly text-cursor animation."
-  :type 'boolean
-  :group 'emskin-jelly
-  :initialize #'custom-initialize-default
-  :set (lambda (sym val)
-         (set-default sym val)
-         (when (bound-and-true-p emskin--process)
-           (emskin--send `((type . "set_jelly_cursor")
-                           (enabled . ,(if val t :json-false)))))
-         (if val
-             (emskin-jelly--install-hooks)
-           (emskin-jelly--remove-hooks))))
-
-(defcustom emskin-jelly-fallback-color "#89dceb"
-  "Fallback cursor color (hex) when no `cursor' face background is set.
-Most themes set it; this rarely shows."
-  :type 'string
-  :group 'emskin-jelly)
-
-(defvar emskin-jelly--last-info nil
-  "Last sent `(WINDOW . \"x:y:w:h:color\")' pair.
+(defvar emskin--jelly-last-info nil
+  "Last sent jelly caret `(WINDOW . \"x:y:w:h:color\")' pair.
 The window component is a cheap tiebreaker so moving to a different
 window at the same pixel coords still fires a new animation.")
 
 ;; ---------------------------------------------------------------------------
-;; Cursor rect computation (holo-layer port)
+;; Caret rect computation
 ;; ---------------------------------------------------------------------------
 
-(defun emskin-jelly--window-pixel-edges (window)
+(defun emskin--jelly-window-origin (window)
   "Return (X Y) of WINDOW's top-left in Emacs surface coordinates.
 Adds the GTK external menu/tool-bar offset so the result matches what
 the compositor sees as the Emacs surface origin."
@@ -57,13 +30,12 @@ the compositor sees as the Emacs surface origin."
     (list (nth 0 edges)
           (+ (nth 1 edges) (emskin--frame-header-offset (window-frame window))))))
 
-(defun emskin-jelly--cursor-rect ()
-  "Return (X Y W H COLOR) of the current text cursor in surface pixels.
-Returns nil when point is not visible in the selected window."
+(defun emskin--jelly-cursor-rect ()
+  "Return (X Y W H COLOR) of the text caret in surface pixels, or nil."
   (when-let* ((p (point))
               (window (selected-window))
               (vis (pos-visible-in-window-p p window t))
-              (alloc (emskin-jelly--window-pixel-edges window)))
+              (alloc (emskin--jelly-window-origin window)))
     (let* ((wx (nth 0 alloc))
            (wy (nth 1 alloc))
            (fringe-l (or (car (window-fringes window)) 0))
@@ -78,57 +50,50 @@ Returns nil when point is not visible in the selected window."
       (list x y cursor-w cursor-h color))))
 
 ;; ---------------------------------------------------------------------------
-;; IPC + hook
+;; Post-command monitor
 ;; ---------------------------------------------------------------------------
 
-(defun emskin-jelly--send (info)
-  "Send INFO (x y w h color) or nil for cancel."
-  (let ((x (or (nth 0 info) 0))
-        (y (or (nth 1 info) 0))
-        (w (or (nth 2 info) 0))
-        (h (or (nth 3 info) 0))
-        (color (nth 4 info)))
-    (emskin--send `((type . "set_cursor_rect")
-                    (x . ,x) (y . ,y) (w . ,w) (h . ,h)
-                    (color . ,(or color :null))))))
+(defun emskin--jelly-send (info)
+  "Send caret INFO (x y w h color) or nil (cancel) to the compositor."
+  (emskin--send `((type . "set_cursor_rect")
+                  (x . ,(or (nth 0 info) 0))
+                  (y . ,(or (nth 1 info) 0))
+                  (w . ,(or (nth 2 info) 0))
+                  (h . ,(or (nth 3 info) 0))
+                  (color . ,(or (nth 4 info) :null)))))
 
-(defun emskin-jelly-monitor ()
-  "Push the current cursor rect to the compositor if it moved."
-  (when (and emskin-jelly-cursor
-             (bound-and-true-p emskin--process))
-    (let ((info (emskin-jelly--cursor-rect))
+(defun emskin--jelly-monitor ()
+  "Push the current caret rect if it moved.
+Self-gates on `emskin-jelly-cursor' and `emskin--process' so the hook
+can stay permanently installed on `post-command-hook'."
+  (when (and emskin-jelly-cursor emskin--process)
+    (let ((info (emskin--jelly-cursor-rect))
           (window (selected-window)))
       (cond
        ((null info)
-        (when emskin-jelly--last-info
-          (emskin-jelly--send nil)
-          (setq emskin-jelly--last-info nil)))
+        (when emskin--jelly-last-info
+          (emskin--jelly-send nil)
+          (setq emskin--jelly-last-info nil)))
        (t
         (let ((key (cons window
                          (format "%d:%d:%d:%d:%s"
                                  (nth 0 info) (nth 1 info)
                                  (nth 2 info) (nth 3 info) (nth 4 info)))))
-          (unless (equal key emskin-jelly--last-info)
-            (emskin-jelly--send info)
-            (setq emskin-jelly--last-info key))))))))
+          (unless (equal key emskin--jelly-last-info)
+            (emskin--jelly-send info)
+            (setq emskin--jelly-last-info key))))))))
 
-(defun emskin-jelly--install-hooks ()
-  (add-hook 'post-command-hook #'emskin-jelly-monitor))
+(defun emskin--jelly-cursor-sync ()
+  (unless emskin-jelly-cursor
+    ;; Clear the dedup key so the next enable re-primes from the real
+    ;; current caret position instead of animating across the gap.
+    (setq emskin--jelly-last-info nil))
+  (emskin--send `((type . "set_jelly_cursor")
+                  (enabled . ,(emskin--jbool emskin-jelly-cursor)))))
 
-(defun emskin-jelly--remove-hooks ()
-  (remove-hook 'post-command-hook #'emskin-jelly-monitor)
-  (setq emskin-jelly--last-info nil)
-  (when (bound-and-true-p emskin--process)
-    (emskin-jelly--send nil)))
+(emskin-define-toggle jelly-cursor "jelly cursor")
 
-(defun emskin-toggle-jelly-cursor ()
-  "Toggle the jelly text-cursor animation."
-  (interactive)
-  (customize-set-variable 'emskin-jelly-cursor (not emskin-jelly-cursor))
-  (message "emskin: jelly cursor %s" (if emskin-jelly-cursor "ON" "OFF")))
-
-(when emskin-jelly-cursor
-  (emskin-jelly--install-hooks))
+(add-hook 'post-command-hook #'emskin--jelly-monitor)
 
 (provide 'emskin-jelly)
 ;;; emskin-jelly.el ends here

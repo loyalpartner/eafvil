@@ -94,7 +94,7 @@ impl Default for JellyCursor {
 impl JellyCursor {
     pub fn new() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             state: AnimState::Idle,
             buf: MemoryRenderBuffer::new(Fourcc::Argb8888, (1, 1), 1, Transform::Normal, None),
             commit: CommitCounter::default(),
@@ -604,6 +604,7 @@ mod tests {
     #[test]
     fn update_with_none_sets_idle() {
         let mut jc = JellyCursor::new();
+        jc.set_enabled(true);
         jc.update(Some(Rectangle::new((10, 10).into(), (8, 16).into())), Duration::ZERO);
         assert!(matches!(jc.state, AnimState::Primed(_)));
         jc.update(None, Duration::from_millis(50));
@@ -619,6 +620,7 @@ mod tests {
     #[test]
     fn update_with_changed_rect_seeds_animation() {
         let mut jc = JellyCursor::new();
+        jc.set_enabled(true);
         jc.update(
             Some(Rectangle::new((0, 0).into(), (8, 16).into())),
             Duration::ZERO,
@@ -633,6 +635,7 @@ mod tests {
     #[test]
     fn update_mid_flight_retargets_without_stalling() {
         let mut jc = JellyCursor::new();
+        jc.set_enabled(true);
         jc.update(Some(Rectangle::new((0, 0).into(), (8, 16).into())), Duration::ZERO);
         jc.update(
             Some(Rectangle::new((20, 0).into(), (8, 16).into())),
