@@ -125,10 +125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = child.kill();
         let _ = child.wait();
     }
-    // Bar child: emskin's Wayland socket closes on exit, which makes the bar
-    // disconnect and exit on its own. We still reap explicitly to avoid a
-    // zombie if the bar is slow to shut down.
+    // Bar child: we originally hoped the Wayland socket close (on state
+    // drop) would make the bar exit on its own, but state is still alive
+    // here — wait() would deadlock. Kill explicitly, same as Emacs.
     if let Some(mut child) = state.bar_child.take() {
+        let _ = child.kill();
         let _ = child.wait();
     }
 
