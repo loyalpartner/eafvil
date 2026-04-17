@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "include-component-in-tag": false,
+  "separate-pull-requests": false,
+  "packages": {
+    "crates/emskin": {
+      "release-type": "rust",
+      "package-name": "emskin",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "../../Cargo.toml"
+        }
+      ]
+    }
+  }
+}

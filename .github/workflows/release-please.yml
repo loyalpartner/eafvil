@@ -1,0 +1,24 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # Config + manifest live at repo root. When commits since the
+          # last tag arrive on main, this action either (a) opens/updates
+          # a Release PR bumping versions + CHANGELOG, or (b) on merge of
+          # that PR, creates the git tag + GitHub Release. The existing
+          # release.yml still fires on tag push and publishes the tarball
+          # to AUR — no change needed there.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
