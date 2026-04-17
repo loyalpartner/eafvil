@@ -3,13 +3,17 @@
   "include-component-in-tag": false,
   "separate-pull-requests": false,
   "packages": {
-    "crates/emskin": {
-      "release-type": "rust",
+    ".": {
+      "release-type": "simple",
       "package-name": "emskin",
       "extra-files": [
         {
           "type": "generic",
-          "path": "../../Cargo.toml"
+          "path": "Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/emskin/Cargo.toml"
         }
       ]
     }
