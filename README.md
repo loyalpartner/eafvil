@@ -208,7 +208,8 @@ Make sure mesa is installed: `sudo pacman -S mesa mesa-utils` (Arch) or `sudo ap
 
 ## Acknowledgements
 
-Built on [Smithay](https://github.com/Smithay/smithay), a Wayland compositor library for Rust.
+- [Smithay](https://github.com/Smithay/smithay) — the Rust Wayland compositor library emskin is built on.
+- [holo-layer](https://github.com/manateelazycat/holo-layer) — the jelly text-cursor effect and the elisp caret-tracking pattern (`post-command-hook` + `pos-visible-in-window-p`) are adapted from holo-layer. Thanks to [@manateelazycat](https://github.com/manateelazycat).
 
 ## License
 

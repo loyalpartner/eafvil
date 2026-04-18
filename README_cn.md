@@ -202,7 +202,8 @@ xrandr --output Virtual-1 --mode 1920x1080
 
 ## 致谢
 
-基于 [Smithay](https://github.com/Smithay/smithay) 构建 — Rust 实现的 Wayland 合成器库。
+- [Smithay](https://github.com/Smithay/smithay) — emskin 构建于此，Rust 实现的 Wayland 合成器库。
+- [holo-layer](https://github.com/manateelazycat/holo-layer) — 果冻文本光标特效，以及 elisp 端用 `post-command-hook` + `pos-visible-in-window-p` 跟踪 caret 的方案，借鉴自 holo-layer。感谢 [@manateelazycat](https://github.com/manateelazycat)。
 
 ## License
 
