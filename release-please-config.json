@@ -2,11 +2,11 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "include-component-in-tag": false,
   "separate-pull-requests": false,
-  "pull-request-title-pattern": "chore${scope}: release ${version}",
   "packages": {
     ".": {
       "release-type": "simple",
       "package-name": "emskin",
+      "pull-request-title-pattern": "chore${scope}: release ${version}",
       "extra-files": [
         {
           "type": "generic",
