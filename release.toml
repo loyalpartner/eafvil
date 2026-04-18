@@ -6,7 +6,13 @@ publish = false
 push = true
 tag-prefix = ""
 tag-name = "v{{version}}"
-pre-release-commit-message = "chore: release {{version}}"
+# `{{version}}` / `{{crate_name}}` don't expand in commit messages when
+# `consolidate-commits = true` (per cargo-release reference.md — those
+# placeholders are flagged "yes if not consolidated"). Tag names still
+# expand because `shared-version = true` gives them a workspace version.
+# Keep the commit message literal; the `vX.Y.Z` tag pushed alongside
+# carries the version.
+pre-release-commit-message = "chore: release"
 consolidate-commits = true
 shared-version = true
 
