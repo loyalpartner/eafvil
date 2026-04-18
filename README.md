@@ -12,6 +12,17 @@ emskin wraps Emacs inside a nested Wayland compositor so that **any program** �
 
 ![demo](images/demo.gif)
 
+## Vision
+
+Embedding is the first 5%. The endgame is **Emacs deeply scripting the native apps it hosts** — querying and orchestrating them with the same uniformity Emacs already gives its own buffers. Concretely:
+
+- **Browser** — read the focused tab's DOM into a buffer, eval JS, drive forms from Elisp, route LLM tool calls into the live page.
+- **Terminal** — file/line heuristics in output become clickable jumps back into Emacs; rerun the last command into a fresh buffer.
+- **Video / image apps** — scriptable seek, frame extraction, OCR — all exposed as Elisp commands.
+- **Anything with a surface** — that surface becomes addressable from Elisp.
+
+Same IPC layer (compositor ↔ Elisp) that powers embedding today; each future integration adds one IPC verb on top.
+
 ## Features
 
 - **Embed any program** — Wayland and X11 apps alike, including FPS games / browser Pointer Lock (pointer constraints + raw mouse delta)
