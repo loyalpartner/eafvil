@@ -10,26 +10,14 @@ pre-release-commit-message = "chore: release {{version}}"
 consolidate-commits = true
 shared-version = true
 
-# cargo-release natively bumps each workspace member's [package].version, but
-# two values here are workspace-level literals that need explicit sync:
-#   1. [workspace.package].version in the root Cargo.toml (inherited by
-#      effect-core / effect-plugins / emskin-bar via version.workspace = true)
-#   2. [package].version in crates/emskin/Cargo.toml (literal because cargo-aur
-#      0.x doesn't understand workspace inheritance)
-# Both lines carry the `# x-release-please-version` marker (retained from the
-# earlier release-please setup) as a stable search anchor.
-pre-release-replacements = [
-  { file = "Cargo.toml",
-    search = 'version = "[^"]+" # x-release-please-version',
-    replace = 'version = "{{version}}" # x-release-please-version',
-    min = 1, max = 1 },
-  { file = "crates/emskin/Cargo.toml",
-    search = 'version = "[^"]+" # x-release-please-version',
-    replace = 'version = "{{version}}" # x-release-please-version',
-    min = 1, max = 1 },
-]
-
-# Regenerate CHANGELOG.md from conventional commits before the release commit.
-# The hook runs once per package, but `-o` overwrite (no `--prepend`) keeps it
-# idempotent; every invocation produces the same content.
-pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "v{{version}}"]
+# cargo-release already bumps [workspace.package].version AND every
+# [package].version literal on its own (confirmed by the dry-run output:
+# "Upgrading workspace to version X.Y.Z" + "Upgrading <crate> from ..."),
+# so no pre-release-replacements are needed here.
+#
+# The pre-release-hook for git-cliff lives in
+# crates/emskin/Cargo.toml's [package.metadata.release] instead of here,
+# because cargo-release runs hooks with the package root as CWD. Scoping
+# it to the emskin crate gives git-cliff a predictable relative path
+# (`../../CHANGELOG.md`) and ensures the hook fires exactly once per
+# release, not once per workspace member.

@@ -29,6 +29,12 @@ clap = { version = "4", features = ["derive"] }
 include_dir = "0.7"
 png = "0.17"
 
+[package.metadata.release]
+# cargo-release runs hooks with the package root as CWD. Scope the
+# git-cliff hook to this crate so it fires exactly once per release,
+# and write CHANGELOG.md to the workspace root via `../../`.
+pre-release-hook = ["git-cliff", "-o", "../../CHANGELOG.md", "--tag", "v{{version}}"]
+
 [package.metadata.aur]
 depends = ["wayland", "libxkbcommon", "libxkbcommon-x11", "mesa", "libinput", "seatd", "fontconfig", "freetype2", "xorg-xwayland"]
 optdepends = ["emacs-wayland: pgtk Emacs (recommended)", "emacs: X11 Emacs (works via XWayland)"]
