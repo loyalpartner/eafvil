@@ -63,10 +63,19 @@ cd emskin && cargo build --release
 
 ## Quick Start
 
+**Recommended.** `--standalone` is non-invasive:
+
 ```bash
-# Zero-config: auto-loads built-in elisp, no Emacs setup needed
 emskin --standalone
 ```
+
+What it does:
+
+- Pre-loads the bundled `emskin.el` from `$XDG_RUNTIME_DIR/emskin-<pid>/elisp/` so you don't need a `(require 'emskin)` of your own.
+- Your **`~/.emacs.d/init.el` still loads as usual** — no `-Q`, no `--no-init-file`. Your packages, keybindings, themes, `(setq emskin-cursor-trail t)` etc. all keep working.
+- Cleans up the extracted elisp dir on exit.
+
+The only edge case: if you separately cloned emskin and added `(require 'emskin)` from your own `load-path`, the bundled copy will have already been loaded and your `require` becomes a no-op. Developers working on emskin itself should skip `--standalone` and load the elisp manually (see [Emacs Configuration](#emacs-configuration)).
 
 ## Usage
 

@@ -63,10 +63,19 @@ cd emskin && cargo build --release
 
 ## 快速开始
 
+**推荐方式。** `--standalone` 不侵入你现有的 Emacs 配置：
+
 ```bash
-# 零配置体验（自动加载内置 elisp，无需任何 Emacs 配置）
 emskin --standalone
 ```
+
+它做了什么：
+
+- 从 `$XDG_RUNTIME_DIR/emskin-<pid>/elisp/` 预加载内置的 `emskin.el`，你不必自己写 `(require 'emskin)`。
+- **`~/.emacs.d/init.el` 仍然按平常方式加载**——没有 `-Q`、没有 `--no-init-file`。你的 package、快捷键、主题、`(setq emskin-cursor-trail t)` 等照常生效。
+- 退出时清理临时 elisp 目录。
+
+唯一的边界情况：如果你单独 clone 了 emskin 并在 init.el 里 `(require 'emskin)`，内置版本已经被预加载，你的 `require` 会变成 no-op；正在开发 emskin 本身的人请跳过 `--standalone`，改用手动加载（见 [Emacs 配置](#emacs-配置)）。
 
 ## 使用
 
