@@ -3,7 +3,7 @@ name = "emskin"
 # NOTE: cargo-aur (0.x) does not understand `version.workspace = true`.
 # Keep these as literal values until cargo-aur gains workspace-inheritance
 # support, then migrate them back to `.workspace = true`.
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 authors = ["Lee <loyalpartner@163.com>"]
 license = "GPL-3.0"
@@ -34,6 +34,14 @@ png = "0.17"
 # git-cliff hook to this crate so it fires exactly once per release,
 # and write CHANGELOG.md to the workspace root via `../../`.
 pre-release-hook = ["git-cliff", "-o", "../../CHANGELOG.md", "--tag", "v{{version}}"]
+# Join the "workspace" shared-version group so `cargo release X.Y.Z`
+# bumps this literal `version` in lockstep with `[workspace.package].version`.
+# cargo-release only auto-groups crates that use `version.workspace = true`;
+# literal-version crates (us — cargo-aur 0.x limitation) need explicit
+# opt-in, otherwise the literal stays stale while the workspace tag
+# advances (symptom: `crates/emskin/Cargo.toml` stuck at 0.3.6 while
+# the v0.3.7 tag went out, and the AUR PKGBUILD's source URL 404s).
+shared-version = "workspace"
 
 [package.metadata.aur]
 depends = ["wayland", "libxkbcommon", "libxkbcommon-x11", "mesa", "libinput", "seatd", "fontconfig", "freetype2", "xorg-xwayland"]
