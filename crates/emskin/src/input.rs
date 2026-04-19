@@ -1,10 +1,10 @@
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
+        KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
-        keyboard::keysyms,
+        keyboard::{keysyms, xkb, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
     reexports::wayland_server::Resource,
@@ -29,15 +29,25 @@ impl EmskinState {
 
                 // Peek at keysym: only Emacs prefix keys (C-x, C-c, M-x)
                 // redirect focus to Emacs; everything else goes to the focused app.
+                // Side-effect: push the chord into key_cast on press only —
+                // releases would clutter the overlay with duplicate labels.
+                let pressed = matches!(event.state(), KeyState::Pressed);
                 let (is_prefix, mods_changed) = keyboard.input_intercept(
                     self,
                     event.key_code(),
                     event.state(),
-                    |_state, modifiers, keysym_handle| {
+                    |state, modifiers, keysym_handle| {
                         let Some(sym) = keysym_handle.raw_latin_sym_or_raw_current_sym() else {
                             return false;
                         };
                         let key = sym.raw();
+
+                        if pressed && !is_modifier_keysym(key) {
+                            if let Some(label) = format_chord(modifiers, key) {
+                                state.key_cast.borrow_mut().push(label);
+                            }
+                        }
+
                         (modifiers.ctrl && matches!(key, keysyms::KEY_x | keysyms::KEY_c))
                             || (modifiers.alt && key == keysyms::KEY_x)
                     },
@@ -374,4 +384,95 @@ impl EmskinState {
             _ => {}
         }
     }
+}
+
+/// Pure-modifier keysyms — pressing one alone shouldn't generate a
+/// chord entry (Shift / Control / Alt / Super / AltGr).
+fn is_modifier_keysym(key: u32) -> bool {
+    matches!(
+        key,
+        keysyms::KEY_Shift_L
+            | keysyms::KEY_Shift_R
+            | keysyms::KEY_Control_L
+            | keysyms::KEY_Control_R
+            | keysyms::KEY_Alt_L
+            | keysyms::KEY_Alt_R
+            | keysyms::KEY_Meta_L
+            | keysyms::KEY_Meta_R
+            | keysyms::KEY_Super_L
+            | keysyms::KEY_Super_R
+            | keysyms::KEY_Hyper_L
+            | keysyms::KEY_Hyper_R
+            | keysyms::KEY_ISO_Level3_Shift
+            | keysyms::KEY_Caps_Lock
+            | keysyms::KEY_Num_Lock
+    )
+}
+
+/// Build an Emacs-style chord label like `C-x`, `M-RET`, `<f5>`,
+/// `s-SPC`. Returns `None` for keysyms we can't sensibly name (the
+/// overlay just skips that press rather than showing a noise label).
+fn format_chord(modifiers: &ModifiersState, key: u32) -> Option<String> {
+    let key_name = keysym_label(key)?;
+
+    let mut s = String::new();
+    if modifiers.ctrl {
+        s.push_str("C-");
+    }
+    if modifiers.alt {
+        s.push_str("M-");
+    }
+    if modifiers.logo {
+        s.push_str("s-");
+    }
+    // Single printable chars already encode shift in the keysym (`X` vs
+    // `x`). Only show "S-" for multi-char names like "S-<f5>" or "S-RET".
+    if modifiers.shift && key_name.len() > 1 {
+        s.push_str("S-");
+    }
+    s.push_str(&key_name);
+    Some(s)
+}
+
+/// Map an X11 keysym to a short human-readable label.
+///
+/// Naming follows Emacs's `single-key-description` convention (`RET`,
+/// `<f5>`, `<deletechar>`) rather than xev / GTK's, so the on-screen
+/// chord matches what Emacs users see in `C-h k` and the message area.
+fn keysym_label(key: u32) -> Option<String> {
+    let label = match key {
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => "RET",
+        keysyms::KEY_Tab | keysyms::KEY_ISO_Left_Tab => "TAB",
+        keysyms::KEY_BackSpace => "DEL",
+        keysyms::KEY_Delete | keysyms::KEY_KP_Delete => "<deletechar>",
+        keysyms::KEY_Escape => "ESC",
+        keysyms::KEY_space | keysyms::KEY_KP_Space => "SPC",
+        keysyms::KEY_Up | keysyms::KEY_KP_Up => "<up>",
+        keysyms::KEY_Down | keysyms::KEY_KP_Down => "<down>",
+        keysyms::KEY_Left | keysyms::KEY_KP_Left => "<left>",
+        keysyms::KEY_Right | keysyms::KEY_KP_Right => "<right>",
+        keysyms::KEY_Page_Up | keysyms::KEY_KP_Page_Up => "<prior>",
+        keysyms::KEY_Page_Down | keysyms::KEY_KP_Page_Down => "<next>",
+        keysyms::KEY_Home | keysyms::KEY_KP_Home => "<home>",
+        keysyms::KEY_End | keysyms::KEY_KP_End => "<end>",
+        _ => {
+            // F-keys span KEY_F1 ..= KEY_F35 contiguously.
+            if (keysyms::KEY_F1..=keysyms::KEY_F35).contains(&key) {
+                return Some(format!("<f{}>", key - keysyms::KEY_F1 + 1));
+            }
+            // Printable ASCII — round-trip through char.
+            if (0x20..=0x7e).contains(&key) {
+                return char::from_u32(key).map(|c| c.to_string());
+            }
+            // Fall back to xkbcommon's keysym name for less common keys
+            // (e.g. multimedia keys). Returns "NoSymbol" for unknown — drop
+            // those so the overlay isn't spammed with noise labels.
+            let name = xkb::keysym_get_name(xkb::Keysym::new(key));
+            if name == "NoSymbol" || name.is_empty() {
+                return None;
+            }
+            return Some(format!("<{}>", name));
+        }
+    };
+    Some(label.to_string())
 }

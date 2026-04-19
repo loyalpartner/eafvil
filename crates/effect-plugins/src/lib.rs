@@ -12,6 +12,7 @@
 //! - [`splash`] — startup animation, dismissed on Emacs connect
 //! - [`cursor_trail`] — elastic trailing animation behind the mouse cursor
 //! - [`jelly_cursor`] — holo-layer-style elastic animation of Emacs's text caret
+//! - [`key_cast`] — screencast-style chord display at the bottom of the canvas
 //!
 //! Workspace bar used to live here but was extracted into a standalone
 //! program (`crates/emskin-bar/`) that talks to the compositor via
@@ -20,6 +21,7 @@
 pub mod bitmap_font;
 pub mod cursor_trail;
 pub mod jelly_cursor;
+pub mod key_cast;
 pub mod measure;
 pub mod recorder;
 pub mod skeleton;

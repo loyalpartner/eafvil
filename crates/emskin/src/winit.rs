@@ -291,6 +291,23 @@ fn render_frame(
     let overlay_at = state.recorder.overlay_started_at(now);
     state.recorder_overlay.borrow_mut().set_active(overlay_at);
 
+    // Recording ⇆ KeyCast linkage. Edge-trigger only so user toggles
+    // (`SetKeyCast` IPC) outside a recording session aren't stomped.
+    let recording_active = overlay_at.is_some();
+    if recording_active != state.last_recording_active {
+        state.last_recording_active = recording_active;
+        state.key_cast.borrow_mut().set_enabled(recording_active);
+        tracing::debug!(
+            "key_cast auto-{} (recording {})",
+            if recording_active { "on" } else { "off" },
+            if recording_active {
+                "started"
+            } else {
+                "stopped"
+            }
+        );
+    }
+
     // Keep the render loop warm while a capture/recording is in progress —
     // otherwise an idle compositor stops generating frames and the video
     // would stall at whatever the last damage event was.

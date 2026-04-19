@@ -62,6 +62,10 @@ pub enum IncomingMessage {
     SetCursorTrail {
         enabled: bool,
     },
+    /// Enable/disable the key-cast overlay (live keystroke display).
+    SetKeyCast {
+        enabled: bool,
+    },
     /// Set (and enable/disable) the skeleton overlay (frame layout inspector).
     /// When `enabled` is false, `rects` is ignored and the overlay is cleared.
     SetSkeleton {
@@ -326,6 +330,13 @@ mod tests {
             msg,
             IncomingMessage::SetCursorTrail { enabled: true }
         ));
+    }
+
+    #[test]
+    fn parses_set_key_cast() {
+        let json = r#"{"type":"set_key_cast","enabled":true}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, IncomingMessage::SetKeyCast { enabled: true }));
     }
 
     #[test]
