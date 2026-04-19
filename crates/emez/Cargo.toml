@@ -1,0 +1,22 @@
+[package]
+name = "emez"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal smithay-based wayland compositor used as a controllable test host for emskin's E2E suite."
+
+[dependencies]
+smithay = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+# Self-pipe-based signal iterator so we can stop the event loop on
+# SIGTERM/SIGINT without relying on async-signal-safe primitives inside
+# the handler itself.
+signal-hook = "0.3"
+
+[[bin]]
+name = "emez"
+path = "src/main.rs"

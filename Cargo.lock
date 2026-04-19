@@ -562,6 +562,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "emez"
+version = "0.3.6"
+dependencies = [
+ "clap",
+ "signal-hook",
+ "smithay",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "emskin"
 version = "0.3.6"
 dependencies = [
@@ -1787,6 +1798,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1842,7 +1873,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/emskin/smithay.git?branch=emskin-patches#41630f89efde1850361575a78129f4d9642d5983"
+source = "git+https://github.com/emskin/smithay.git?branch=emskin-patches#4d3e1c86f1b0a4fb7df876db0af849f4bba06f88"
 dependencies = [
  "appendlist",
  "atomic_float",
