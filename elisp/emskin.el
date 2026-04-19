@@ -46,6 +46,13 @@ rect.  Toggle with `emskin-toggle-skeleton'.")
 Spring-damped circles follow the pointer and bounce back when it
 stops.  Toggle with `emskin-toggle-cursor-trail'.")
 
+(defvar emskin-key-cast nil
+  "Non-nil to show the key-cast overlay — live keystroke display.
+Recently pressed chords appear in a rounded translucent pill at the
+bottom of the screen, useful for screencasts and pair programming.
+Auto-enabled while recording (see `emskin-toggle-record').  Toggle
+manually with `emskin-toggle-key-cast'.")
+
 (defvar emskin-jelly-cursor nil
   "Non-nil to show the jelly text-cursor animation.
 On every command that moves point, a filled quadrilateral stretches
@@ -124,6 +131,7 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 (require 'emskin-skeleton)
 (require 'emskin-cursor-trail)
 (require 'emskin-jelly)
+(require 'emskin-key-cast)
 (require 'emskin-record)
 
 ;; ---------------------------------------------------------------------------

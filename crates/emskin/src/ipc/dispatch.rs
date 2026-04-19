@@ -46,6 +46,10 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
             tracing::debug!("IPC set_cursor_trail enabled={enabled}");
             state.cursor_trail.borrow_mut().set_enabled(enabled);
         }
+        IncomingMessage::SetKeyCast { enabled } => {
+            tracing::debug!("IPC set_key_cast enabled={enabled}");
+            state.key_cast.borrow_mut().set_enabled(enabled);
+        }
         IncomingMessage::SetSkeleton { enabled, rects } => {
             tracing::debug!("IPC set_skeleton enabled={enabled} rects={}", rects.len());
             let mut sk = state.skeleton.borrow_mut();

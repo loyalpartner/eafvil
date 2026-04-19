@@ -221,6 +221,7 @@ pub struct EmskinState {
     pub jelly_cursor: std::rc::Rc<std::cell::RefCell<effect_plugins::jelly_cursor::JellyCursor>>,
     pub recorder_overlay:
         std::rc::Rc<std::cell::RefCell<effect_plugins::recorder::RecorderOverlay>>,
+    pub key_cast: std::rc::Rc<std::cell::RefCell<effect_plugins::key_cast::KeyCastOverlay>>,
 
     /// Whether a skeleton label-click was swallowed — matching release must
     /// also be swallowed. Lives in the window manager, not the overlay.
@@ -230,6 +231,11 @@ pub struct EmskinState {
     /// exactly once. Initialised false; set to true the first frame Emacs's
     /// surface is present.
     pub last_emacs_connected: bool,
+
+    /// Edge-detect latch for "recording state changed" → toggles
+    /// `key_cast` overlay on/off so screencasts always show keystrokes
+    /// without the user having to enable it separately.
+    pub last_recording_active: bool,
 
     /// Current cursor image status. For Named, the host cursor is used;
     /// for Surface (GTK3/Emacs), the cursor is software-rendered each frame.
@@ -329,6 +335,10 @@ impl EmskinState {
             &mut effect_chain,
             effect_plugins::recorder::RecorderOverlay::new(),
         );
+        let key_cast = register_overlay(
+            &mut effect_chain,
+            effect_plugins::key_cast::KeyCastOverlay::new(),
+        );
 
         Ok(Self {
             start_time,
@@ -398,8 +408,10 @@ impl EmskinState {
             cursor_trail,
             jelly_cursor,
             recorder_overlay,
+            key_cast,
             skeleton_click_absorbed: false,
             last_emacs_connected: false,
+            last_recording_active: false,
             cursor_status: CursorImageStatus::default_named(),
             cursor_changed: false,
             last_pointer_raw_loc: None,
