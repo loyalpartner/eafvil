@@ -65,14 +65,20 @@ impl IpcServer {
     }
 
     /// Send a message. If no client is connected, the message is buffered.
+    ///
+    /// Non-blocking: if the socket returns EAGAIN, bytes stay in the write
+    /// buffer and are drained by the next `flush()` call from the event
+    /// loop tick. This matters because the IPC source is registered with
+    /// READ interest only in calloop — WRITE readiness wouldn't fire.
     pub fn send(&mut self, msg: OutgoingMessage) {
-        if let Some(conn) = &mut self.connection {
-            conn.enqueue(&msg);
-            if let Err(e) = conn.try_flush() {
-                tracing::warn!("IPC write error: {e}");
-            }
-        } else {
+        let Some(conn) = &mut self.connection else {
             self.pending.push(msg);
+            return;
+        };
+        conn.enqueue(&msg);
+        if let Err(e) = conn.try_flush() {
+            tracing::warn!("IPC write error: {e}");
+            self.connection = None;
         }
     }
 
@@ -118,7 +124,8 @@ impl IpcServer {
         Some(msgs)
     }
 
-    /// Flush pending writes (call after inserting WRITE interest in calloop).
+    /// Drain any bytes parked in the write buffer after a previous EAGAIN.
+    /// Called every event-loop tick so late messages don't sit indefinitely.
     pub fn flush(&mut self) {
         if let Some(conn) = &mut self.connection {
             if let Err(e) = conn.try_flush() {
