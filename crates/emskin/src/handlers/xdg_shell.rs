@@ -1,3 +1,5 @@
+use smithay::wayland::text_input::TextInputSeat;
+
 use smithay::{
     delegate_xdg_shell,
     desktop::{
@@ -57,6 +59,9 @@ impl XdgShellHandler for EmskinState {
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(self, Some(window.into()), serial);
             }
+            self.seat.text_input().set_focus(self.emacs_surface.clone());
+            self.seat.text_input().enter();
+            self.focus.pending_ime_allowed = Some(true);
         } else if self.is_emacs_client(surface.wl_surface()) {
             // Same Wayland client as Emacs — could be a new frame (C-x 5 2) or
             // a child frame (posframe, company-posframe, etc.).
