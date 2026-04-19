@@ -77,16 +77,29 @@ impl SeatHandler for EmskinState {
         }
         self.focus.text_input_focus = new;
 
-        // Only enable host IME when the focused client has bound text_input_v3.
-        // Apps using their own IM module (fcitx5-gtk via DBus) don't bind it
-        // and need raw keyboard events from wl_keyboard instead.
-        let mut has_ti = false;
-        ti.with_focused_text_input(|_, _| {
-            has_ti = true;
-        });
-        if self.focus.pending_ime_allowed != Some(has_ti) {
-            self.focus.pending_ime_allowed = Some(has_ti);
-        }
+        // Keep host IME enabled unconditionally on every focus change.
+        //
+        // The previous policy gated `pending_ime_allowed` on whether the
+        // focused client had already bound zwp_text_input_v3 (observed via
+        // `with_focused_text_input`). That check runs synchronously inside
+        // `focus_changed`, which is itself invoked synchronously from
+        // `keyboard.set_focus` — at a moment where a freshly-connected
+        // client has not yet had a roundtrip to bind text_input_v3. The
+        // first focus transition therefore latched `Some(false)`, and
+        // `winit::apply_pending_state` then called `set_ime_allowed(false)`,
+        // killing host IME until focus cycled through another window.
+        //
+        // Concrete symptom: Chinese / IME input did not work in pgtk Emacs
+        // on startup unless the user opened another app first (#40).
+        //
+        // Leaving IME allowed unconditionally has no observable downside:
+        //   * Clients that bind text_input_v3 (Chrome, pgtk Emacs) receive
+        //     preedit/commit via the bridge exactly as before.
+        //   * Clients using their own IM module (GTK/Qt via fcitx5 DBus,
+        //     gtk3 Emacs) don't bind text_input_v3; winit's Ime events are
+        //     silently dropped by the bridge when no focused text_input
+        //     is bound, and raw wl_keyboard events are unaffected.
+        self.focus.pending_ime_allowed = Some(true);
     }
 }
 
