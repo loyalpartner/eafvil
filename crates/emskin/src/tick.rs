@@ -51,6 +51,8 @@ pub fn event_loop_tick(state: &mut EmskinState) {
         state.needs_redraw = true;
     }
 
+    state.ipc.flush();
+
     // --- Process clipboard events from host compositor ---
     let clipboard_events = state
         .selection
