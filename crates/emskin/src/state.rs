@@ -57,8 +57,14 @@ pub struct FocusState {
     /// Tracks text_input focus for manual enter/leave management. Kept as
     /// `WlSurface` because text_input_v3 is a Wayland-only protocol.
     pub text_input_focus: Option<WlSurface>,
-    /// Deferred `set_ime_allowed` for the winit window.
+    /// Deferred `set_ime_allowed` for the winit window. Consumed (`.take()`)
+    /// in `winit::apply_pending_state` each tick.
     pub pending_ime_allowed: Option<bool>,
+    /// Last value actually applied to `winit::set_ime_allowed`. Used to
+    /// debounce the apply step so we don't re-send `zwp_text_input_v3.enable`
+    /// to the host on every focus event — that can feed back through IME
+    /// traffic into more focus changes and thrash the protocol.
+    pub ime_currently_allowed: bool,
     /// Saved keyboard focus before a layer surface took it.
     pub layer_saved_focus: Option<crate::KeyboardFocusTarget>,
 }
@@ -713,7 +719,13 @@ impl EmskinState {
         self.focus.prefix_saved_focus = None;
         self.focus.layer_saved_focus = None;
         self.focus.text_input_focus = None;
-        self.focus.pending_ime_allowed = Some(false);
+        // NOTE: intentionally not touching `pending_ime_allowed` /
+        // `ime_currently_allowed` here. The subsequent `keyboard.set_focus`
+        // drives `focus_changed`, which re-requests the IME state based on
+        // whether the new focus is non-empty. Forcing `Some(false)` here
+        // pushed an extra `set_ime_allowed(false)` into the apply tick, which
+        // together with focus_changed's follow-up request caused a visible
+        // enable/disable oscillation under the host IME.
         // Reset skeleton state for the new workspace (window manager drives this,
         // not the effect trait).
         {

@@ -77,15 +77,28 @@ impl SeatHandler for EmskinState {
         }
         self.focus.text_input_focus = new;
 
-        // Only enable host IME when the focused client has bound text_input_v3.
-        // Apps using their own IM module (fcitx5-gtk via DBus) don't bind it
-        // and need raw keyboard events from wl_keyboard instead.
-        let mut has_ti = false;
-        ti.with_focused_text_input(|_, _| {
-            has_ti = true;
-        });
-        if self.focus.pending_ime_allowed != Some(has_ti) {
-            self.focus.pending_ime_allowed = Some(has_ti);
+        // Request host IME whenever a surface holds focus; drop it only
+        // when focus becomes empty.
+        //
+        // The previous policy gated this on `with_focused_text_input` —
+        // i.e. only enable IME if the focused client had already bound
+        // zwp_text_input_v3. But `focus_changed` runs synchronously from
+        // `keyboard.set_focus`, before a freshly-connected client has had
+        // a roundtrip to bind text_input_v3, so the first focus transition
+        // latched `Some(false)` and Chinese/IME input stayed broken in
+        // pgtk Emacs until focus cycled through another app.
+        //
+        // Requesting IME for every focused surface is safe: clients that
+        // bind text_input_v3 receive preedit/commit via the bridge as
+        // before, and clients that don't bind it (GTK/Qt via fcitx5 DBus,
+        // gtk3 Emacs) have winit's `Ime` events silently dropped by the
+        // bridge — raw wl_keyboard events are unaffected.
+        //
+        // Debouncing lives in `winit::apply_pending_state` so repeat focus
+        // events don't spam `set_ime_allowed`.
+        let desired = self.focus.text_input_focus.is_some();
+        if self.focus.ime_currently_allowed != desired {
+            self.focus.pending_ime_allowed = Some(desired);
         }
     }
 }

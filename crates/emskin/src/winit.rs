@@ -57,7 +57,15 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
     }
 
     if let Some(allowed) = state.focus.pending_ime_allowed.take() {
-        backend.window().set_ime_allowed(allowed);
+        // Debounce: only cross the winit boundary when the value actually
+        // changes. Each `set_ime_allowed` call translates to a
+        // `zwp_text_input_v3.enable` / `disable` request to the host; repeat
+        // calls can feed back as IME events that trigger more focus changes
+        // and oscillate the IME state.
+        if state.focus.ime_currently_allowed != allowed {
+            backend.window().set_ime_allowed(allowed);
+            state.focus.ime_currently_allowed = allowed;
+        }
     }
 
     if state.cursor_changed {
