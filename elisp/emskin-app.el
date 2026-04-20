@@ -126,7 +126,10 @@ rather than assuming the elisp toggle is the single source of truth."
     ;; Delete ALL windows showing this buffer (source + mirrors).
     ;; Walk in reverse so deletion doesn't invalidate the list.
     (dolist (win (reverse (get-buffer-window-list buf nil t)))
-      (when (cdr (window-list (window-frame win) 'no-minibuf))
+      ;; `window-list` count is not enough here: the main window of a frame
+      ;; can still be non-deletable when side windows exist. Guard with the
+      ;; real Emacs predicate to avoid "Attempt to delete main window".
+      (when (window-deletable-p win)
         (delete-window win)))
     (kill-buffer buf)
     ;; Clean up mirror-table entry.
