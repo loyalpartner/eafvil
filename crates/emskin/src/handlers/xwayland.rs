@@ -23,6 +23,7 @@ use smithay::{
     },
 };
 
+use crate::clipboard_bridge::SelectionTargetExt;
 use crate::{utils::SizeExt, EmskinState};
 
 impl XwmHandler for EmskinState {
@@ -246,7 +247,7 @@ impl XwmHandler for EmskinState {
         // clipboard before the user ever types anything.
         if self.ipc.is_connected() {
             if let Some(ref mut clipboard) = self.selection.clipboard {
-                clipboard.set_host_selection(selection, &mime_types);
+                clipboard.set_host_selection(selection.to_kind(), &mime_types);
             }
         } else {
             tracing::debug!("Skipping pre-IPC host push of X11 {selection:?} selection");
@@ -268,7 +269,7 @@ impl XwmHandler for EmskinState {
             }
         }
         if let Some(ref mut clipboard) = self.selection.clipboard {
-            clipboard.clear_host_selection(selection);
+            clipboard.clear_host_selection(selection.to_kind());
         }
     }
 
@@ -308,7 +309,7 @@ impl XwmHandler for EmskinState {
             }
             SelectionOrigin::Host => {
                 if let Some(ref mut clipboard) = self.selection.clipboard {
-                    clipboard.receive_from_host(selection, &mime_type, fd);
+                    clipboard.receive_from_host(selection.to_kind(), &mime_type, fd);
                 } else {
                     tracing::warn!("X11 paste origin=Host but no ClipboardProxy; dropping fd");
                     drop(fd);

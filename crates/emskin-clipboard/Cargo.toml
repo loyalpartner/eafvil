@@ -1,0 +1,20 @@
+[package]
+name = "emskin-clipboard"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host clipboard proxy backends (data-control / wl_data_device / X11) for nested Wayland compositors"
+
+[dependencies]
+tracing.workspace = true
+# client_system enables the libwayland-client FFI backend, which is what
+# provides `Backend::from_foreign_display` — required by the wl_data_device
+# fallback that piggybacks on an externally-owned wl_display pointer.
+wayland-client = { version = "0.31", features = ["log"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["xfixes"] }
+libc = "0.2"

@@ -54,24 +54,26 @@ pub fn event_loop_tick(state: &mut EmskinState) {
     state.ipc.flush();
 
     // --- Process clipboard events from host compositor ---
-    // Drive `dispatch()` on every tick. For data-control / X11 backends
-    // this is idempotent (calloop fd-source already dispatched on
-    // readable). For the wl_data_device fallback (shared connection,
-    // no owned fd) this tick call is the ONLY drain point — winit reads
-    // the shared fd, events enqueue internally, and we must convert
-    // them into ClipboardEvents before `take_events`.
+    // `OwnedFd` backends (data-control, X11) are driven by their calloop
+    // fd source in `main::register_clipboard_source`, so we just drain
+    // events here. `Piggyback` backends (wl_data_device on winit's
+    // shared connection) have no owned fd — this tick is the only point
+    // at which we can collect buffered events from libwayland's per-queue
+    // ring before draining them.
     let clipboard_events = state
         .selection
         .clipboard
         .as_mut()
         .map(|c| {
-            c.dispatch();
+            if matches!(c.driver(), emskin_clipboard::Driver::Piggyback) {
+                c.dispatch();
+            }
             c.take_events()
         })
         .unwrap_or_default();
     let has_clipboard_events = !clipboard_events.is_empty();
     for event in clipboard_events {
-        crate::clipboard_dispatch::handle_clipboard_event(state, event);
+        crate::clipboard_bridge::handle_clipboard_event(state, event);
     }
     // Flush immediately so Wayland clients see selection changes / send
     // requests without waiting for the next render frame.

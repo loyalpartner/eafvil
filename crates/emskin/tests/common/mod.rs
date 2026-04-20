@@ -796,10 +796,7 @@ fn wl_paste_inner(xdg: &Path, socket: &str, extra_args: &[&str]) -> String {
     }
     cmd.arg("--no-newline");
     configure_wl_clipboard_env(&mut cmd, xdg, socket);
-    let output = cmd
-        .stderr(Stdio::piped())
-        .output()
-        .expect("spawn wl-paste");
+    let output = cmd.stderr(Stdio::piped()).output().expect("spawn wl-paste");
     if !output.status.success() {
         panic!(
             "wl-paste failed (exit={}): stderr={}",

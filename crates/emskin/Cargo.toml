@@ -13,6 +13,7 @@ description = "Nested Wayland compositor for Emacs"
 [dependencies]
 effect-core = { path = "../effect-core" }
 effect-plugins = { path = "../effect-plugins" }
+emskin-clipboard = { path = "../emskin-clipboard" }
 smithay.workspace = true
 cosmic-text.workspace = true
 serde.workspace = true
@@ -21,9 +22,11 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 bitflags = "2.2.1"
 winit_crate = { package = "winit", version = "0.30", default-features = false }
+# wayland-client still needed for the xdg_activation_v1 client helper in
+# main.rs::activate_main_surface_if_env_token. Clipboard backends live in
+# the emskin-clipboard crate now.
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "server", "staging"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 include_dir = "0.7"

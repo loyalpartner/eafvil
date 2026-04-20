@@ -1,20 +1,22 @@
 # emskin workspace
 
-Cargo workspace, four crates with a hard dep boundary:
+Cargo workspace, five crates with hard dep boundaries:
 
 ```
 crates/
-├── effect-core/      # Effect trait, EffectChain, render helpers
-├── effect-plugins/   # built-in overlays (one file per plugin)
-├── emskin/           # compositor binary, IPC, handlers/, tests/
-└── emskin-bar/       # standalone Wayland client (zero workspace deps)
-elisp/                # Emacs-side client, embedded via include_dir!
-demo/                 # demo scripts, embedded
+├── effect-core/       # Effect trait, EffectChain, render helpers
+├── effect-plugins/    # built-in overlays (one file per plugin)
+├── emskin/            # compositor binary, IPC, handlers/, tests/
+├── emskin-bar/        # standalone Wayland client (zero workspace deps)
+└── emskin-clipboard/  # smithay-free host clipboard proxy (data-control / wl_data_device / X11)
+elisp/                 # Emacs-side client, embedded via include_dir!
+demo/                  # demo scripts, embedded
 ```
 
 ```
 emskin      ──→  effect-core
-       └──→  effect-plugins  ──→  effect-core
+       └──→  effect-plugins   ──→  effect-core
+       └──→  emskin-clipboard
 emskin-bar  ──→  (nothing in this workspace)
 ```
 
@@ -24,6 +26,10 @@ emskin-bar  ──→  (nothing in this workspace)
 - `emskin-bar` links against nothing in this workspace on purpose: any
   third-party layer-shell bar (waybar, eww) must remain a drop-in
   replacement.
+- `emskin-clipboard` **cannot** `use smithay` — it's a self-contained
+  host clipboard proxy usable by any nested Wayland compositor. The
+  smithay-aware glue (SelectionTarget ↔ SelectionKind mapping, XWM
+  replay, async pipe drain for X11) lives in `emskin/src/clipboard_bridge.rs`.
 
 Deeper per-crate notes live in each `crates/*/CLAUDE.md`.
 

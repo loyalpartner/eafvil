@@ -2,7 +2,8 @@ use clap::Parser;
 use include_dir::{include_dir, Dir};
 use smithay::reexports::wayland_server::Display;
 
-use emskin::{clipboard, clipboard_wl, clipboard_x11, cursor_x11, ipc, state, EmskinState};
+use emskin::{cursor_x11, ipc, state, EmskinState};
+use emskin_clipboard::{BackendHint, ClipboardBackend};
 
 static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../elisp");
 static DEMO_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../demo");
@@ -147,24 +148,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // harness doesn't need it anymore because each test gets its own
     // private host compositor (see `tests/common/mod.rs::NestedHost`).
     if std::env::var_os("EMSKIN_DISABLE_HOST_CLIPBOARD").is_none() {
-        state.selection.clipboard = clipboard::ClipboardProxy::new()
-            .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
-            .or_else(|| {
-                // SAFETY: `host_wl_display_ptr` returns the wl_display
-                // owned by winit's backend. `state.backend` stays alive
-                // for the entire compositor run (dropped when main()
-                // returns), and `state.selection.clipboard` is dropped
-                // before state.backend as part of the same struct's
-                // default field-drop order — so the proxy never outlives
-                // the wl_display it borrows.
-                let ptr = host_wl_display_ptr(&state)?;
-                unsafe { clipboard_wl::WlDataDeviceProxy::new(ptr) }
-                    .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
-            })
-            .or_else(|| {
-                clipboard_x11::X11ClipboardProxy::new()
-                    .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
-            });
+        // Fallback chain: data-control (owns its own host connection, focus-free)
+        // → wl_data_device on winit's shared connection (focus-gated) → X11
+        // selection (only meaningful when the host is Xorg). See
+        // emskin_clipboard::BackendHint for per-variant semantics.
+        let mut hints: Vec<BackendHint> = vec![BackendHint::DataControl];
+        if let Some(ptr) = host_wl_display_ptr(&state) {
+            // SAFETY: the wl_display is owned by winit's backend, which
+            // lives in `state.backend` for the entire compositor run. The
+            // returned clipboard backend sits in `state.selection.clipboard`
+            // on the same struct, so default field-drop order guarantees
+            // the backend drops before the wl_display.
+            hints.push(unsafe { BackendHint::wl_data_device(ptr) });
+        }
+        hints.push(BackendHint::X11);
+
+        state.selection.clipboard = emskin_clipboard::init(&hints);
         if let Some(ref clipboard) = state.selection.clipboard {
             register_clipboard_source(&mut event_loop, clipboard.as_ref())?;
         }
@@ -490,12 +489,19 @@ fn start_xwayland(
 
 fn register_clipboard_source(
     event_loop: &mut smithay::reexports::calloop::EventLoop<EmskinState>,
-    clipboard: &dyn clipboard::ClipboardBackend,
+    clipboard: &dyn ClipboardBackend,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use emskin_clipboard::Driver;
     use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
     use std::os::unix::io::{AsRawFd, FromRawFd};
 
-    let raw_fd = clipboard.connection_fd().as_raw_fd();
+    // Piggyback backends (wl_data_device on a foreign wl_display) are drained
+    // every tick from tick.rs — no owned fd to register here.
+    let raw_fd = match clipboard.driver() {
+        Driver::OwnedFd(fd) => fd.as_raw_fd(),
+        Driver::Piggyback => return Ok(()),
+    };
+
     // SAFETY: dup() returns a valid fd that we transfer ownership to File.
     let dup_fd = unsafe { libc::dup(raw_fd) };
     if dup_fd < 0 {
@@ -562,7 +568,9 @@ fn activate_main_surface_if_env_token(state: &EmskinState) {
     use wayland_client::protocol::wl_registry;
     use wayland_client::protocol::wl_surface::WlSurface;
     use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
-    use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::{self, XdgActivationV1};
+    use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::{
+        self, XdgActivationV1,
+    };
 
     let Some(token) = std::env::var("XDG_ACTIVATION_TOKEN")
         .ok()
@@ -655,7 +663,10 @@ fn activate_main_surface_if_env_token(state: &EmskinState) {
     // One roundtrip so the activate request actually leaves our queue
     // before we drop the connection.
     let _ = queue.roundtrip(&mut st);
-    tracing::info!("requested self-activation via xdg_activation_v1 (token bytes={})", token.len());
+    tracing::info!(
+        "requested self-activation via xdg_activation_v1 (token bytes={})",
+        token.len()
+    );
 }
 
 fn init_logging(log_file: Option<&std::path::Path>) {

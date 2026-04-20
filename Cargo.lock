@@ -582,6 +582,7 @@ dependencies = [
  "cosmic-text",
  "effect-core",
  "effect-plugins",
+ "emskin-clipboard",
  "include_dir",
  "libc",
  "png",
@@ -592,7 +593,6 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
- "wayland-protocols-wlr",
  "winit",
 ]
 
@@ -607,6 +607,19 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "emskin-clipboard"
+version = "0.3.9"
+dependencies = [
+ "libc",
+ "tracing",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "x11rb",
 ]
 
 [[package]]
@@ -2369,6 +2382,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "645c7c96bb74690c3189b5c9cb4ca1627062bb23693a4fad9d8c3de958260144"
 dependencies = [
  "bitflags 2.11.1",
+ "log",
  "rustix 1.1.4",
  "wayland-backend",
  "wayland-scanner",
