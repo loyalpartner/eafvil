@@ -316,16 +316,17 @@ fn drain_and_take_over_clipboard(emez: &mut Emez, seat: &Seat<Emez>, mimes: Vec<
         let mut fds = [0i32; 2];
         let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
         if rc != 0 {
-            tracing::warn!("clipboard-manager pipe2 failed: {}", std::io::Error::last_os_error());
+            tracing::warn!(
+                "clipboard-manager pipe2 failed: {}",
+                std::io::Error::last_os_error()
+            );
             continue;
         }
         // SAFETY: pipe2 returned 0 → both fds are valid and owned.
         let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-        if let Err(e) =
-            request_data_device_client_selection(seat, mime.clone(), write_fd)
-        {
+        if let Err(e) = request_data_device_client_selection(seat, mime.clone(), write_fd) {
             tracing::warn!("request_data_device_client_selection({mime}) failed: {e:?}");
             continue;
         }
@@ -342,13 +343,8 @@ fn drain_and_take_over_clipboard(emez: &mut Emez, seat: &Seat<Emez>, mimes: Vec<
             let mut chunk = [0u8; 65536];
             loop {
                 // SAFETY: chunk is a valid mutable buffer; fd is owned by `file`.
-                let n = unsafe {
-                    libc::read(
-                        file.as_raw_fd(),
-                        chunk.as_mut_ptr().cast(),
-                        chunk.len(),
-                    )
-                };
+                let n =
+                    unsafe { libc::read(file.as_raw_fd(), chunk.as_mut_ptr().cast(), chunk.len()) };
                 if n > 0 {
                     if let Some(buf) = state.clipboard_buffer.get_mut(&mime_owned) {
                         buf.extend_from_slice(&chunk[..n as usize]);
@@ -466,7 +462,7 @@ impl XdgActivationHandler for Emez {
         let primary_gone = self
             .primary_fallback_focus
             .as_ref()
-            .map_or(true, |s| !s.is_alive());
+            .is_none_or(|s| !s.is_alive());
         if primary_gone {
             self.primary_fallback_focus = Some(surface.clone());
         }

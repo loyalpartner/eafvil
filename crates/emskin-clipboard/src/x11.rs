@@ -1,23 +1,20 @@
-//! X11 host clipboard synchronization.
+//! X11 host clipboard backend.
 //!
-//! When emskin runs on an X11 host (no Wayland compositor), this module bridges
-//! the host X11 selection protocol with internal Wayland clients via the same
-//! `ClipboardEvent` interface used by the Wayland clipboard proxy.
+//! When the host is X11 (no Wayland compositor), this module bridges the
+//! host X11 selection protocol into the unified [`ClipboardBackend`]
+//! interface.
 
 use std::collections::HashMap;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 
-use smithay::reexports::x11rb;
-use x11rb::connection::Connection;
+use x11rb::connection::Connection as _;
 use x11rb::protocol::xfixes::{self, ConnectionExt as XfixesExt, SelectionEventMask};
 use x11rb::protocol::xproto::*;
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use smithay::wayland::selection::SelectionTarget;
-
-use crate::clipboard::ClipboardEvent;
+use crate::backend::{AsyncCompletion, ClipboardBackend, ClipboardEvent, Driver, SelectionKind};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -75,25 +72,25 @@ fn atom_from_mime(mime: &str, conn: &RustConnection, atoms: &ClipboardAtoms) -> 
     }
 }
 
-fn selection_atom(target: SelectionTarget, atoms: &ClipboardAtoms) -> Atom {
-    match target {
-        SelectionTarget::Clipboard => atoms.CLIPBOARD,
-        SelectionTarget::Primary => atoms.PRIMARY,
+fn selection_atom(kind: SelectionKind, atoms: &ClipboardAtoms) -> Atom {
+    match kind {
+        SelectionKind::Clipboard => atoms.CLIPBOARD,
+        SelectionKind::Primary => atoms.PRIMARY,
     }
 }
 
-fn property_atom(target: SelectionTarget, atoms: &ClipboardAtoms) -> Atom {
-    match target {
-        SelectionTarget::Clipboard => atoms._EMSKIN_CLIP_SEL,
-        SelectionTarget::Primary => atoms._EMSKIN_PRIM_SEL,
+fn property_atom(kind: SelectionKind, atoms: &ClipboardAtoms) -> Atom {
+    match kind {
+        SelectionKind::Clipboard => atoms._EMSKIN_CLIP_SEL,
+        SelectionKind::Primary => atoms._EMSKIN_PRIM_SEL,
     }
 }
 
-fn selection_target_from_atom(atom: Atom, atoms: &ClipboardAtoms) -> Option<SelectionTarget> {
+fn selection_kind_from_atom(atom: Atom, atoms: &ClipboardAtoms) -> Option<SelectionKind> {
     if atom == atoms.CLIPBOARD {
-        Some(SelectionTarget::Clipboard)
+        Some(SelectionKind::Clipboard)
     } else if atom == atoms.PRIMARY {
-        Some(SelectionTarget::Primary)
+        Some(SelectionKind::Primary)
     } else {
         None
     }
@@ -106,7 +103,7 @@ fn selection_target_from_atom(atom: Atom, atoms: &ClipboardAtoms) -> Option<Sele
 /// Pending ConvertSelection response — either TARGETS query or data fetch.
 enum PendingConvert {
     /// Waiting for TARGETS list after XFixes notification.
-    Targets { selection_target: SelectionTarget },
+    Targets { kind: SelectionKind },
     /// Waiting for actual data to forward to an internal client fd.
     Data {
         fd: OwnedFd,
@@ -126,7 +123,7 @@ struct IncrOutgoing {
 // X11ClipboardProxy
 // ---------------------------------------------------------------------------
 
-pub struct X11ClipboardProxy {
+pub(crate) struct X11ClipboardProxy {
     conn: RustConnection,
     atoms: ClipboardAtoms,
     window: Window,
@@ -144,7 +141,8 @@ pub struct X11ClipboardProxy {
 
     // Outgoing transfer state.
     next_outgoing_id: u64,
-    /// X11 requests waiting for pipe data (calloop reads the pipe).
+    /// X11 requests waiting for pipe data (caller drains the pipe, then
+    /// invokes `complete_outgoing`).
     outgoing_requests: HashMap<u64, SelectionRequestEvent>,
     /// Active INCR transfers (pipe data already received, sending chunks).
     incr_outgoing: Vec<IncrOutgoing>,
@@ -157,7 +155,7 @@ pub struct X11ClipboardProxy {
 impl X11ClipboardProxy {
     /// Connect to the X11 display and set up selection monitoring.
     /// Returns `None` if connection or setup fails.
-    pub fn new() -> Option<Self> {
+    pub(crate) fn new() -> Option<Self> {
         let (conn, screen_num) = match RustConnection::connect(None) {
             Ok(c) => c,
             Err(e) => {
@@ -210,8 +208,7 @@ impl X11ClipboardProxy {
             return None;
         }
 
-        // Query XFixes extension.
-        // We only need XFixes v1 for selection monitoring.
+        // Query XFixes extension (v1 is enough for selection monitoring).
         if let Err(e) = conn.xfixes_query_version(1, 0) {
             tracing::warn!("XFixes query failed: {e}");
             return None;
@@ -237,15 +234,15 @@ impl X11ClipboardProxy {
         // Query initial clipboard state using separate property atoms
         // so responses don't collide with later XFixes-triggered queries.
         let mut pending_converts = HashMap::new();
-        for (sel, target, init_prop) in [
+        for (sel, kind, init_prop) in [
             (
                 atoms.CLIPBOARD,
-                SelectionTarget::Clipboard,
+                SelectionKind::Clipboard,
                 atoms._EMSKIN_CLIP_INIT,
             ),
             (
                 atoms.PRIMARY,
-                SelectionTarget::Primary,
+                SelectionKind::Primary,
                 atoms._EMSKIN_PRIM_INIT,
             ),
         ] {
@@ -266,12 +263,7 @@ impl X11ClipboardProxy {
                     tracing::warn!("Initial ConvertSelection(TARGETS) failed: {e}");
                     continue;
                 }
-                pending_converts.insert(
-                    (sel, init_prop),
-                    PendingConvert::Targets {
-                        selection_target: target,
-                    },
-                );
+                pending_converts.insert((sel, init_prop), PendingConvert::Targets { kind });
             }
         }
         let _ = conn.flush();
@@ -295,113 +287,6 @@ impl X11ClipboardProxy {
         })
     }
 
-    /// Borrow the X11 connection fd for calloop registration.
-    pub fn connection_fd(&self) -> BorrowedFd<'_> {
-        self.conn.stream().as_fd()
-    }
-
-    /// Read pending events from the X11 connection (non-blocking).
-    pub fn dispatch(&mut self) {
-        loop {
-            match self.conn.poll_for_event() {
-                Ok(Some(event)) => self.handle_event(event),
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::warn!("X11 poll_for_event error: {e}");
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Drain queued clipboard events for the compositor.
-    pub fn take_events(&mut self) -> Vec<ClipboardEvent> {
-        std::mem::take(&mut self.events)
-    }
-
-    /// Forward host selection data to an internal client's fd.
-    ///
-    /// Initiates a ConvertSelection request. The data is forwarded
-    /// asynchronously via subsequent dispatch() calls.
-    pub fn receive_from_host(&mut self, target: SelectionTarget, mime_type: &str, fd: OwnedFd) {
-        tracing::trace!("receive_from_host: {target:?} mime={mime_type}");
-        let sel = selection_atom(target, &self.atoms);
-        let prop = property_atom(target, &self.atoms);
-
-        let Some(target_atom) = atom_from_mime(mime_type, &self.conn, &self.atoms) else {
-            tracing::warn!("receive_from_host: cannot map MIME '{mime_type}' to atom");
-            return;
-        };
-
-        if let Err(e) =
-            self.conn
-                .convert_selection(self.window, sel, target_atom, prop, x11rb::CURRENT_TIME)
-        {
-            tracing::warn!("ConvertSelection failed: {e}");
-            return;
-        }
-        let _ = self.conn.flush();
-
-        self.pending_converts.insert(
-            (sel, prop),
-            PendingConvert::Data {
-                fd,
-                incr: false,
-                data: Vec::new(),
-            },
-        );
-    }
-
-    /// Advertise an internal client's selection to the host.
-    pub fn set_host_selection(&mut self, target: SelectionTarget, mime_types: &[String]) {
-        let sel = selection_atom(target, &self.atoms);
-
-        if let Err(e) = self
-            .conn
-            .set_selection_owner(self.window, sel, x11rb::CURRENT_TIME)
-        {
-            tracing::warn!("set_selection_owner failed: {e}");
-            return;
-        }
-        let _ = self.conn.flush();
-
-        match target {
-            SelectionTarget::Clipboard => {
-                self.our_clipboard_mimes = mime_types.to_vec();
-                self.suppress_clipboard += 1;
-            }
-            SelectionTarget::Primary => {
-                self.our_primary_mimes = mime_types.to_vec();
-                self.suppress_primary += 1;
-            }
-        }
-    }
-
-    /// Clear our selection on the host.
-    pub fn clear_host_selection(&mut self, target: SelectionTarget) {
-        let sel = selection_atom(target, &self.atoms);
-
-        if let Err(e) = self
-            .conn
-            .set_selection_owner(0u32, sel, x11rb::CURRENT_TIME)
-        {
-            tracing::warn!("clear_selection_owner failed: {e}");
-            return;
-        }
-        let _ = self.conn.flush();
-
-        match target {
-            SelectionTarget::Clipboard => {
-                self.our_clipboard_mimes.clear();
-                self.suppress_clipboard += 1;
-            }
-            SelectionTarget::Primary => {
-                self.our_primary_mimes.clear();
-                self.suppress_primary += 1;
-            }
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Event handling
     // -----------------------------------------------------------------------
@@ -419,24 +304,23 @@ impl X11ClipboardProxy {
     /// Host selection owner changed (XFixes notification).
     fn on_xfixes_notify(&mut self, n: xfixes::SelectionNotifyEvent) {
         tracing::trace!("XFixes: selection owner changed (owner={})", n.owner);
-        let Some(target) = selection_target_from_atom(n.selection, &self.atoms) else {
+        let Some(kind) = selection_kind_from_atom(n.selection, &self.atoms) else {
             return;
         };
 
         // If we are the new owner, this is our own set_selection_owner echo.
         if n.owner == self.window {
-            // Store timestamp for later use.
-            match target {
-                SelectionTarget::Clipboard => self.our_clipboard_ts = n.selection_timestamp,
-                SelectionTarget::Primary => self.our_primary_ts = n.selection_timestamp,
+            match kind {
+                SelectionKind::Clipboard => self.our_clipboard_ts = n.selection_timestamp,
+                SelectionKind::Primary => self.our_primary_ts = n.selection_timestamp,
             }
             return;
         }
 
         // Check suppress counter.
-        let suppress = match target {
-            SelectionTarget::Clipboard => &mut self.suppress_clipboard,
-            SelectionTarget::Primary => &mut self.suppress_primary,
+        let suppress = match kind {
+            SelectionKind::Clipboard => &mut self.suppress_clipboard,
+            SelectionKind::Primary => &mut self.suppress_primary,
         };
         if *suppress > 0 {
             *suppress -= 1;
@@ -446,7 +330,7 @@ impl X11ClipboardProxy {
         // If owner is NONE, selection was cleared.
         if n.owner == 0 {
             self.events.push(ClipboardEvent::HostSelectionChanged {
-                target,
+                kind,
                 mime_types: Vec::new(),
             });
             return;
@@ -454,7 +338,7 @@ impl X11ClipboardProxy {
 
         // Query TARGETS from the new owner.
         let sel = n.selection;
-        let prop = property_atom(target, &self.atoms);
+        let prop = property_atom(kind, &self.atoms);
 
         if let Err(e) = self.conn.convert_selection(
             self.window,
@@ -468,12 +352,8 @@ impl X11ClipboardProxy {
         }
         let _ = self.conn.flush();
 
-        self.pending_converts.insert(
-            (sel, prop),
-            PendingConvert::Targets {
-                selection_target: target,
-            },
-        );
+        self.pending_converts
+            .insert((sel, prop), PendingConvert::Targets { kind });
     }
 
     /// Response to our ConvertSelection request.
@@ -489,11 +369,9 @@ impl X11ClipboardProxy {
         // property == NONE means conversion failed.
         if n.property == x11rb::NONE {
             tracing::trace!("SelectionNotify: conversion failed (property=NONE)");
-            if let Some(PendingConvert::Targets { selection_target }) =
-                self.pending_converts.remove(&key)
-            {
+            if let Some(PendingConvert::Targets { kind }) = self.pending_converts.remove(&key) {
                 self.events.push(ClipboardEvent::HostSelectionChanged {
-                    target: selection_target,
+                    kind,
                     mime_types: Vec::new(),
                 });
             }
@@ -505,8 +383,8 @@ impl X11ClipboardProxy {
         };
 
         match pending {
-            PendingConvert::Targets { selection_target } => {
-                self.handle_targets_reply(selection_target, n.property);
+            PendingConvert::Targets { kind } => {
+                self.handle_targets_reply(kind, n.property);
             }
             PendingConvert::Data { fd, incr, data } => {
                 self.handle_data_reply(n.selection, n.property, fd, incr, data);
@@ -515,7 +393,7 @@ impl X11ClipboardProxy {
     }
 
     /// Parse TARGETS property and emit HostSelectionChanged.
-    fn handle_targets_reply(&mut self, target: SelectionTarget, property: Atom) {
+    fn handle_targets_reply(&mut self, kind: SelectionKind, property: Atom) {
         let reply = match self.conn.get_property(
             true, // delete after reading
             self.window,
@@ -553,9 +431,9 @@ impl X11ClipboardProxy {
             })
             .unwrap_or_default();
 
-        tracing::debug!("Host {target:?} changed ({} types)", mime_types.len());
+        tracing::debug!("Host {kind:?} changed ({} types)", mime_types.len());
         self.events
-            .push(ClipboardEvent::HostSelectionChanged { target, mime_types });
+            .push(ClipboardEvent::HostSelectionChanged { kind, mime_types });
     }
 
     /// Read data property and write to the internal client fd.
@@ -684,14 +562,14 @@ impl X11ClipboardProxy {
             req.requestor,
             req.target
         );
-        let Some(target) = selection_target_from_atom(req.selection, &self.atoms) else {
+        let Some(kind) = selection_kind_from_atom(req.selection, &self.atoms) else {
             Self::send_selection_notify(&self.conn, &req, false);
             return;
         };
 
-        let our_mimes = match target {
-            SelectionTarget::Clipboard => &self.our_clipboard_mimes,
-            SelectionTarget::Primary => &self.our_primary_mimes,
+        let our_mimes = match kind {
+            SelectionKind::Clipboard => &self.our_clipboard_mimes,
+            SelectionKind::Primary => &self.our_primary_mimes,
         };
 
         if our_mimes.is_empty() {
@@ -720,9 +598,9 @@ impl X11ClipboardProxy {
 
         // TIMESTAMP request.
         if req.target == self.atoms.TIMESTAMP {
-            let ts = match target {
-                SelectionTarget::Clipboard => self.our_clipboard_ts,
-                SelectionTarget::Primary => self.our_primary_ts,
+            let ts = match kind {
+                SelectionKind::Clipboard => self.our_clipboard_ts,
+                SelectionKind::Primary => self.our_primary_ts,
             };
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
@@ -755,52 +633,11 @@ impl X11ClipboardProxy {
         self.outgoing_requests.insert(id, req);
 
         self.events.push(ClipboardEvent::HostSendRequest {
-            id,
-            target,
+            kind,
             mime_type,
             write_fd,
-            read_fd: Some(read_fd),
+            completion: Some(AsyncCompletion { id, read_fd }),
         });
-    }
-
-    /// Complete an outgoing transfer after calloop has read all pipe data.
-    pub fn complete_outgoing(&mut self, id: u64, data: Vec<u8>) {
-        let Some(req) = self.outgoing_requests.remove(&id) else {
-            return;
-        };
-
-        tracing::debug!("Outgoing transfer complete: {} bytes", data.len());
-
-        if data.len() > INCR_CHUNK_SIZE {
-            // Start INCR transfer for large data.
-            let size = data.len() as u32;
-            let _ = self.conn.change_property32(
-                PropMode::REPLACE,
-                req.requestor,
-                req.property,
-                self.atoms.INCR,
-                &[size],
-            );
-            Self::send_selection_notify(&self.conn, &req, true);
-            let _ = self.conn.flush();
-
-            self.incr_outgoing.push(IncrOutgoing {
-                request: req,
-                data,
-                flush_on_delete: false,
-            });
-            return;
-        }
-
-        let _ = self.conn.change_property8(
-            PropMode::REPLACE,
-            req.requestor,
-            req.property,
-            req.target,
-            &data,
-        );
-        Self::send_selection_notify(&self.conn, &req, true);
-        let _ = self.conn.flush();
     }
 
     /// Handle PropertyNotify(DELETE) for outgoing INCR transfers.
@@ -889,41 +726,141 @@ impl X11ClipboardProxy {
     }
 }
 
-impl crate::clipboard::ClipboardBackend for X11ClipboardProxy {
+impl ClipboardBackend for X11ClipboardProxy {
+    fn driver(&self) -> Driver<'_> {
+        Driver::OwnedFd(self.conn.stream().as_fd())
+    }
+
     fn dispatch(&mut self) {
-        self.dispatch();
+        loop {
+            match self.conn.poll_for_event() {
+                Ok(Some(event)) => self.handle_event(event),
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("X11 poll_for_event error: {e}");
+                    break;
+                }
+            }
+        }
     }
 
     fn take_events(&mut self) -> Vec<ClipboardEvent> {
-        self.take_events()
+        std::mem::take(&mut self.events)
     }
 
-    fn connection_fd(&self) -> BorrowedFd<'_> {
-        self.connection_fd()
+    fn receive_from_host(&mut self, kind: SelectionKind, mime_type: &str, fd: OwnedFd) {
+        tracing::trace!("receive_from_host: {kind:?} mime={mime_type}");
+        let sel = selection_atom(kind, &self.atoms);
+        let prop = property_atom(kind, &self.atoms);
+
+        let Some(target_atom) = atom_from_mime(mime_type, &self.conn, &self.atoms) else {
+            tracing::warn!("receive_from_host: cannot map MIME '{mime_type}' to atom");
+            return;
+        };
+
+        if let Err(e) =
+            self.conn
+                .convert_selection(self.window, sel, target_atom, prop, x11rb::CURRENT_TIME)
+        {
+            tracing::warn!("ConvertSelection failed: {e}");
+            return;
+        }
+        let _ = self.conn.flush();
+
+        self.pending_converts.insert(
+            (sel, prop),
+            PendingConvert::Data {
+                fd,
+                incr: false,
+                data: Vec::new(),
+            },
+        );
     }
 
-    fn receive_from_host(
-        &mut self,
-        target: smithay::wayland::selection::SelectionTarget,
-        mime_type: &str,
-        fd: OwnedFd,
-    ) {
-        self.receive_from_host(target, mime_type, fd);
+    fn set_host_selection(&mut self, kind: SelectionKind, mime_types: &[String]) {
+        let sel = selection_atom(kind, &self.atoms);
+
+        if let Err(e) = self
+            .conn
+            .set_selection_owner(self.window, sel, x11rb::CURRENT_TIME)
+        {
+            tracing::warn!("set_selection_owner failed: {e}");
+            return;
+        }
+        let _ = self.conn.flush();
+
+        match kind {
+            SelectionKind::Clipboard => {
+                self.our_clipboard_mimes = mime_types.to_vec();
+                self.suppress_clipboard += 1;
+            }
+            SelectionKind::Primary => {
+                self.our_primary_mimes = mime_types.to_vec();
+                self.suppress_primary += 1;
+            }
+        }
     }
 
-    fn set_host_selection(
-        &mut self,
-        target: smithay::wayland::selection::SelectionTarget,
-        mime_types: &[String],
-    ) {
-        self.set_host_selection(target, mime_types);
-    }
+    fn clear_host_selection(&mut self, kind: SelectionKind) {
+        let sel = selection_atom(kind, &self.atoms);
 
-    fn clear_host_selection(&mut self, target: smithay::wayland::selection::SelectionTarget) {
-        self.clear_host_selection(target);
+        if let Err(e) = self
+            .conn
+            .set_selection_owner(0u32, sel, x11rb::CURRENT_TIME)
+        {
+            tracing::warn!("clear_selection_owner failed: {e}");
+            return;
+        }
+        let _ = self.conn.flush();
+
+        match kind {
+            SelectionKind::Clipboard => {
+                self.our_clipboard_mimes.clear();
+                self.suppress_clipboard += 1;
+            }
+            SelectionKind::Primary => {
+                self.our_primary_mimes.clear();
+                self.suppress_primary += 1;
+            }
+        }
     }
 
     fn complete_outgoing(&mut self, id: u64, data: Vec<u8>) {
-        self.complete_outgoing(id, data);
+        let Some(req) = self.outgoing_requests.remove(&id) else {
+            return;
+        };
+
+        tracing::debug!("Outgoing transfer complete: {} bytes", data.len());
+
+        if data.len() > INCR_CHUNK_SIZE {
+            // Start INCR transfer for large data.
+            let size = data.len() as u32;
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                req.requestor,
+                req.property,
+                self.atoms.INCR,
+                &[size],
+            );
+            Self::send_selection_notify(&self.conn, &req, true);
+            let _ = self.conn.flush();
+
+            self.incr_outgoing.push(IncrOutgoing {
+                request: req,
+                data,
+                flush_on_delete: false,
+            });
+            return;
+        }
+
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            req.requestor,
+            req.property,
+            req.target,
+            &data,
+        );
+        Self::send_selection_notify(&self.conn, &req, true);
+        let _ = self.conn.flush();
     }
 }

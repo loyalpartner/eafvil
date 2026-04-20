@@ -1,10 +1,10 @@
-//! wl_data_device fallback for hosts without wlr/ext data-control.
+//! `wl_data_device` fallback for hosts without wlr/ext data-control.
 //!
-//! Piggybacks on winit's existing Wayland connection (shared via
-//! `Backend::from_foreign_display`) so selection events fire whenever
-//! emskin's window has host keyboard focus. Covers the main user
-//! scenario: user is actively interacting with emskin when copy/paste
-//! happens on the host, so focus is on emskin at the moment.
+//! Piggybacks on an external Wayland connection (typically winit's, shared
+//! via `Backend::from_foreign_display`) so selection events fire whenever
+//! the parent surface has host keyboard focus. Covers the main user
+//! scenario: the user is actively interacting with the nested compositor
+//! when copy/paste happens on the host, so focus is on us at that moment.
 //!
 //! Unlike data-control, `wl_data_device.set_selection` requires an
 //! input-event serial. We bind our own `wl_keyboard` on the host seat
@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 
 use wayland_client::backend::{Backend, ObjectData, ObjectId};
@@ -31,9 +31,7 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 
-use smithay::wayland::selection::SelectionTarget;
-
-use crate::clipboard::{ClipboardBackend, ClipboardEvent};
+use crate::backend::{ClipboardBackend, ClipboardEvent, Driver, SelectionKind};
 
 /// Role tag stored as user data on wl_data_source.
 #[derive(Clone, Debug)]
@@ -81,37 +79,21 @@ impl Drop for State {
     }
 }
 
-pub struct WlDataDeviceProxy {
+pub(crate) struct WlDataDeviceProxy {
     connection: Connection,
     queue: EventQueue<State>,
     inner: State,
-    /// Placeholder fd handed to calloop via `connection_fd()`. We don't
-    /// own the Wayland fd (winit does), so calloop can't wake us on
-    /// Wayland events — instead `dispatch()` is driven from tick.rs.
-    /// This pipe-read end is never written to, so the calloop source
-    /// registered on it will simply never fire, which is what we want.
-    dummy_fd: OwnedFd,
-    /// Write end of the placeholder pipe. Kept open *on purpose*:
-    /// closing it would flip `dummy_fd` into a permanent `POLLHUP`
-    /// state, and calloop's level-triggered source would then fire on
-    /// every poll iteration, busy-looping emskin's event loop. Holding
-    /// the write end keeps the pipe "normal" — empty, not readable,
-    /// never signalled.
-    _pipe_write: OwnedFd,
 }
 
 impl WlDataDeviceProxy {
-    /// Create a proxy that shares `display_ptr` (winit's `wl_display`)
-    /// as its underlying Wayland connection. Returns None if the host
-    /// doesn't expose `wl_data_device_manager` + `wl_seat` or any
-    /// required roundtrip fails.
+    /// Create a proxy that shares `display_ptr` as its underlying Wayland
+    /// connection. Returns None if the host doesn't expose
+    /// `wl_data_device_manager` + `wl_seat` or any required roundtrip fails.
     ///
     /// # Safety
-    /// `display_ptr` must be a valid `*mut wl_display` that stays live
-    /// for the proxy's entire lifetime. emskin enforces this by keeping
-    /// `state.backend` (which owns the wl_display) alive for the whole
-    /// compositor run.
-    pub unsafe fn new(display_ptr: *mut c_void) -> Option<Self> {
+    /// `display_ptr` must be a valid `*mut wl_display` that stays live for
+    /// the proxy's entire lifetime. Caller is responsible for drop order.
+    pub(crate) unsafe fn new(display_ptr: *mut c_void) -> Option<Self> {
         // SAFETY: caller guarantees display_ptr is valid.
         let backend = unsafe { Backend::from_foreign_display(display_ptr.cast()) };
         let connection = Connection::from_backend(backend);
@@ -153,27 +135,13 @@ impl WlDataDeviceProxy {
             return None;
         }
 
-        // Roundtrip 2: let initial selection event arrive if emskin's
+        // Roundtrip 2: let initial selection event arrive if the parent
         // surface already has keyboard focus. On most hosts it doesn't
         // (window just created), so this typically no-ops.
         if let Err(e) = queue.roundtrip(&mut inner) {
             tracing::warn!("wl_data_device roundtrip 2 failed: {e}");
             return None;
         }
-
-        // Placeholder fd pair. See comments on `dummy_fd` / `_pipe_write`.
-        let mut pipe_fds = [0i32; 2];
-        // SAFETY: pipe2 fills both fds or returns -1; we check both.
-        let rc = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) };
-        if rc != 0 {
-            tracing::warn!("wl_data_device: pipe2 failed, cannot allocate placeholder fd");
-            return None;
-        }
-        // SAFETY: pipe2 returned 0, so both fds are valid and owned by us.
-        let dummy_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
-        // SAFETY: same — valid fd on pipe2 success, stored for the
-        // proxy's lifetime so `dummy_fd` never flips to POLLHUP.
-        let pipe_write = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
 
         tracing::info!(
             "Clipboard sync initialized (wl_data_device_manager v{}, shared connection)",
@@ -184,8 +152,6 @@ impl WlDataDeviceProxy {
             connection,
             queue,
             inner,
-            dummy_fd,
-            _pipe_write: pipe_write,
         })
     }
 
@@ -197,12 +163,16 @@ impl WlDataDeviceProxy {
 }
 
 impl ClipboardBackend for WlDataDeviceProxy {
+    fn driver(&self) -> Driver<'_> {
+        // We don't own the connection fd — the host (winit / gtk / ...) owns
+        // it and drains it as part of its own dispatch cycle. By the time
+        // our `dispatch()` runs, events for our queue are already in
+        // libwayland-client's internal per-queue buffer; we just need to
+        // dispatch_pending every tick.
+        Driver::Piggyback
+    }
+
     fn dispatch(&mut self) {
-        // Winit owns the connection fd and already calls prepare_read +
-        // read on its own dispatch cycle. By the time we get here,
-        // events for our queue are already in libwayland-client's
-        // internal per-queue buffer; we just need to drain them into
-        // our `State` via dispatch callbacks.
         if let Err(e) = self.queue.dispatch_pending(&mut self.inner) {
             tracing::warn!("wl_data_device dispatch_pending error: {e}");
         }
@@ -212,12 +182,8 @@ impl ClipboardBackend for WlDataDeviceProxy {
         std::mem::take(&mut self.inner.events)
     }
 
-    fn connection_fd(&self) -> BorrowedFd<'_> {
-        self.dummy_fd.as_fd()
-    }
-
-    fn receive_from_host(&mut self, target: SelectionTarget, mime_type: &str, fd: OwnedFd) {
-        if target != SelectionTarget::Clipboard {
+    fn receive_from_host(&mut self, kind: SelectionKind, mime_type: &str, fd: OwnedFd) {
+        if kind != SelectionKind::Clipboard {
             // Primary selection not supported on this backend yet.
             return;
         }
@@ -229,8 +195,8 @@ impl ClipboardBackend for WlDataDeviceProxy {
         }
     }
 
-    fn set_host_selection(&mut self, target: SelectionTarget, mime_types: &[String]) {
-        if target != SelectionTarget::Clipboard {
+    fn set_host_selection(&mut self, kind: SelectionKind, mime_types: &[String]) {
+        if kind != SelectionKind::Clipboard {
             return;
         }
         let Some(ref manager) = self.inner.manager else {
@@ -257,8 +223,8 @@ impl ClipboardBackend for WlDataDeviceProxy {
         self.flush();
     }
 
-    fn clear_host_selection(&mut self, target: SelectionTarget) {
-        if target != SelectionTarget::Clipboard {
+    fn clear_host_selection(&mut self, kind: SelectionKind) {
+        if kind != SelectionKind::Clipboard {
             return;
         }
         let Some(ref device) = self.inner.device else {
@@ -303,18 +269,17 @@ impl State {
         }
 
         self.events.push(ClipboardEvent::HostSelectionChanged {
-            target: SelectionTarget::Clipboard,
+            kind: SelectionKind::Clipboard,
             mime_types,
         });
     }
 
     fn on_source_send(&mut self, mime_type: String, fd: OwnedFd) {
         self.events.push(ClipboardEvent::HostSendRequest {
-            id: 0,
-            target: SelectionTarget::Clipboard,
+            kind: SelectionKind::Clipboard,
             mime_type,
             write_fd: fd,
-            read_fd: None,
+            completion: None,
         });
     }
 
@@ -323,7 +288,7 @@ impl State {
             s.destroy();
         }
         self.events.push(ClipboardEvent::SourceCancelled {
-            target: SelectionTarget::Clipboard,
+            kind: SelectionKind::Clipboard,
         });
     }
 }
@@ -424,9 +389,8 @@ impl Dispatch<WlDataDevice, ()> for State {
                 state.pending_offers.insert(id.id(), Vec::new());
             }
             Event::Selection { id } => state.on_selection(id),
-            // DnD events (Enter/Leave/Motion/Drop) not handled — emskin
-            // doesn't bridge drag-and-drop between host and embedded
-            // clients (yet).
+            // DnD events (Enter/Leave/Motion/Drop) not handled — we don't
+            // bridge drag-and-drop between host and embedded clients (yet).
             _ => {}
         }
     }

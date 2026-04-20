@@ -24,13 +24,13 @@ use smithay::{
         pointer_constraints::PointerConstraintsState,
         relative_pointer::RelativePointerManagerState,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
-        shell::{
-            wlr_layer::WlrLayerShellState,
-            xdg::{decoration::XdgDecorationState, ToplevelSurface, XdgShellState},
-        },
         selection::{
             ext_data_control::DataControlState as ExtDataControlState,
             wlr_data_control::DataControlState as WlrDataControlState,
+        },
+        shell::{
+            wlr_layer::WlrLayerShellState,
+            xdg::{decoration::XdgDecorationState, ToplevelSurface, XdgShellState},
         },
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -80,7 +80,7 @@ pub struct FocusState {
 #[derive(Default)]
 pub struct SelectionState {
     /// Clipboard synchronization proxy (Wayland or X11 backend).
-    pub clipboard: Option<Box<dyn crate::clipboard::ClipboardBackend>>,
+    pub clipboard: Option<Box<dyn emskin_clipboard::ClipboardBackend>>,
     /// Where the current clipboard selection came from.
     pub clipboard_origin: SelectionOrigin,
     /// Where the current primary selection came from.

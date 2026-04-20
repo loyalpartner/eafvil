@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    ffi::OsString,
-    sync::Arc,
-};
+use std::{collections::HashMap, ffi::OsString, sync::Arc};
 
 use smithay::{
     delegate_xwayland_shell,
@@ -89,9 +85,8 @@ pub struct Emez {
     /// is destroyed or explicitly unfocused, emez falls back to this
     /// one. Mirrors what real compositors do: focus doesn't just evaporate
     /// when a window closes, it returns to the previous in-use window.
-    pub primary_fallback_focus: Option<
-        smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
-    >,
+    pub primary_fallback_focus:
+        Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
 
     // XWayland state. `xwayland_shell_state` advertises the xwayland_shell
     // global unconditionally; the rest are populated by

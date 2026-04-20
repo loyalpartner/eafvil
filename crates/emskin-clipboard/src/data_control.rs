@@ -1,9 +1,8 @@
-//! Clipboard synchronization between host compositor and internal applications.
+//! Wayland data-control backend (ext_data_control_v1 / zwlr_data_control_v1).
 //!
-//! Uses `ext_data_control_v1` (preferred) or `zwlr_data_control_manager_v1` (fallback)
-//! to monitor and control the host's clipboard without requiring keyboard focus.
-//! Bridges clipboard content bidirectionally between the host compositor and
-//! internal Wayland clients (Emacs, embedded apps).
+//! Uses `ext_data_control_v1` (preferred) or `zwlr_data_control_manager_v1`
+//! (fallback) to monitor and control the host's clipboard without requiring
+//! keyboard focus. Owns its own Wayland connection via `$WAYLAND_DISPLAY`.
 
 use std::collections::HashMap;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -26,62 +25,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
 };
 
-use smithay::wayland::selection::SelectionTarget;
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// Trait for host clipboard backends (Wayland data_control or X11 selection).
-pub trait ClipboardBackend {
-    /// Read pending events from the host connection.
-    fn dispatch(&mut self);
-
-    /// Drain queued clipboard events for processing by the compositor.
-    fn take_events(&mut self) -> Vec<ClipboardEvent>;
-
-    /// Borrow the connection fd for calloop registration.
-    fn connection_fd(&self) -> std::os::fd::BorrowedFd<'_>;
-
-    /// Forward host clipboard data to an internal client's fd.
-    fn receive_from_host(
-        &mut self,
-        target: SelectionTarget,
-        mime_type: &str,
-        fd: std::os::fd::OwnedFd,
-    );
-
-    /// Advertise an internal client's selection to the host compositor.
-    fn set_host_selection(&mut self, target: SelectionTarget, mime_types: &[String]);
-
-    /// Clear our selection on the host.
-    fn clear_host_selection(&mut self, target: SelectionTarget);
-
-    /// Complete an outgoing transfer (pipe data fully read by calloop).
-    /// Default is no-op (only X11 backend needs this).
-    fn complete_outgoing(&mut self, _id: u64, _data: Vec<u8>) {}
-}
-
-/// Events from host clipboard that need processing by the compositor.
-pub enum ClipboardEvent {
-    /// Host selection changed. Empty `mime_types` means selection was cleared.
-    HostSelectionChanged {
-        target: SelectionTarget,
-        mime_types: Vec<String>,
-    },
-    /// Host requests data from our selection (external paste of internal copy).
-    /// `write_fd` goes to smithay (client writes data here).
-    /// `read_fd` is `Some` for X11 path (register with calloop), `None` for Wayland.
-    HostSendRequest {
-        id: u64,
-        target: SelectionTarget,
-        mime_type: String,
-        write_fd: OwnedFd,
-        read_fd: Option<OwnedFd>,
-    },
-    /// Our source on the host was cancelled (replaced by another app).
-    SourceCancelled { target: SelectionTarget },
-}
+use crate::backend::{ClipboardBackend, ClipboardEvent, Driver, SelectionKind};
 
 // ---------------------------------------------------------------------------
 // Protocol abstraction — enum wrappers over ext / wlr variants
@@ -277,13 +221,11 @@ impl Drop for ClipboardState {
 impl ClipboardState {
     fn source_and_suppress(
         &mut self,
-        target: SelectionTarget,
+        kind: SelectionKind,
     ) -> (&mut Option<DataControlSource>, &mut u32) {
-        match target {
-            SelectionTarget::Clipboard => {
-                (&mut self.clipboard_source, &mut self.suppress_clipboard)
-            }
-            SelectionTarget::Primary => (&mut self.primary_source, &mut self.suppress_primary),
+        match kind {
+            SelectionKind::Clipboard => (&mut self.clipboard_source, &mut self.suppress_clipboard),
+            SelectionKind::Primary => (&mut self.primary_source, &mut self.suppress_primary),
         }
     }
 
@@ -297,7 +239,7 @@ impl ClipboardState {
         }
     }
 
-    fn on_selection(&mut self, target: SelectionTarget, new_offer: Option<DataControlOffer>) {
+    fn on_selection(&mut self, kind: SelectionKind, new_offer: Option<DataControlOffer>) {
         let mime_types = new_offer
             .as_ref()
             .and_then(|o| self.pending_offers.remove(&o.id()))
@@ -307,9 +249,9 @@ impl ClipboardState {
         // pending_offers entries are stale (e.g. orphaned DnD offers).
         self.pending_offers.clear();
 
-        let (offer_slot, suppress) = match target {
-            SelectionTarget::Clipboard => (&mut self.clipboard_offer, &mut self.suppress_clipboard),
-            SelectionTarget::Primary => (&mut self.primary_offer, &mut self.suppress_primary),
+        let (offer_slot, suppress) = match kind {
+            SelectionKind::Clipboard => (&mut self.clipboard_offer, &mut self.suppress_clipboard),
+            SelectionKind::Primary => (&mut self.primary_offer, &mut self.suppress_primary),
         };
 
         if let Some(old) = offer_slot.take() {
@@ -323,7 +265,7 @@ impl ClipboardState {
         }
 
         self.events
-            .push(ClipboardEvent::HostSelectionChanged { target, mime_types });
+            .push(ClipboardEvent::HostSelectionChanged { kind, mime_types });
     }
 
     fn on_device_finished(&mut self) {
@@ -332,28 +274,27 @@ impl ClipboardState {
     }
 
     fn on_source_send(&mut self, role: &SourceRole, mime_type: String, fd: OwnedFd) {
-        let target = match role {
-            SourceRole::Clipboard => SelectionTarget::Clipboard,
-            SourceRole::Primary => SelectionTarget::Primary,
+        let kind = match role {
+            SourceRole::Clipboard => SelectionKind::Clipboard,
+            SourceRole::Primary => SelectionKind::Primary,
         };
         self.events.push(ClipboardEvent::HostSendRequest {
-            id: 0,
-            target,
+            kind,
             mime_type,
             write_fd: fd,
-            read_fd: None,
+            completion: None,
         });
     }
 
     fn on_source_cancelled(&mut self, role: &SourceRole) {
-        let (target, source_slot) = match role {
-            SourceRole::Clipboard => (SelectionTarget::Clipboard, &mut self.clipboard_source),
-            SourceRole::Primary => (SelectionTarget::Primary, &mut self.primary_source),
+        let (kind, source_slot) = match role {
+            SourceRole::Clipboard => (SelectionKind::Clipboard, &mut self.clipboard_source),
+            SourceRole::Primary => (SelectionKind::Primary, &mut self.primary_source),
         };
         if let Some(s) = source_slot.take() {
             s.destroy();
         }
-        self.events.push(ClipboardEvent::SourceCancelled { target });
+        self.events.push(ClipboardEvent::SourceCancelled { kind });
     }
 }
 
@@ -361,8 +302,8 @@ impl ClipboardState {
 // ClipboardProxy — public API
 // ---------------------------------------------------------------------------
 
-/// Proxy for clipboard synchronization with the host compositor.
-pub struct ClipboardProxy {
+/// Data-control backend proxy.
+pub(crate) struct ClipboardProxy {
     connection: Connection,
     queue: EventQueue<ClipboardState>,
     inner: ClipboardState,
@@ -373,7 +314,7 @@ impl ClipboardProxy {
     ///
     /// Prefers `ext_data_control_v1`, falls back to `zwlr_data_control_manager_v1`.
     /// Returns `None` if neither is supported.
-    pub fn new() -> Option<Self> {
+    pub(crate) fn new() -> Option<Self> {
         let conn = match Connection::connect_to_env() {
             Ok(c) => c,
             Err(e) => {
@@ -436,8 +377,19 @@ impl ClipboardProxy {
         })
     }
 
-    /// Read pending events from the host Wayland connection.
-    pub fn dispatch(&mut self) {
+    fn flush(&self) {
+        if let Err(e) = self.connection.flush() {
+            tracing::warn!("clipboard flush error: {e}");
+        }
+    }
+}
+
+impl ClipboardBackend for ClipboardProxy {
+    fn driver(&self) -> Driver<'_> {
+        Driver::OwnedFd(self.connection.as_fd())
+    }
+
+    fn dispatch(&mut self) {
         if let Some(guard) = self.queue.prepare_read() {
             if let Err(e) = guard.read() {
                 tracing::warn!("clipboard read error: {e}");
@@ -446,43 +398,29 @@ impl ClipboardProxy {
         if let Err(e) = self.queue.dispatch_pending(&mut self.inner) {
             tracing::warn!("clipboard dispatch error: {e}");
         }
-        // No flush here — this is a read path. Write paths
-        // (receive_from_host, set_host_selection, clear_host_selection)
-        // flush after sending their requests.
+        // No flush here — this is a read path. Write paths (receive_from_host,
+        // set_host_selection, clear_host_selection) flush after sending their
+        // requests.
     }
 
-    /// Drain queued clipboard events for processing by the compositor.
-    pub fn take_events(&mut self) -> Vec<ClipboardEvent> {
+    fn take_events(&mut self) -> Vec<ClipboardEvent> {
         std::mem::take(&mut self.inner.events)
     }
 
-    /// Borrow the connection fd for calloop registration.
-    pub fn connection_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        self.connection.as_fd()
-    }
-
-    fn flush(&self) {
-        if let Err(e) = self.connection.flush() {
-            tracing::warn!("clipboard flush error: {e}");
-        }
-    }
-
-    /// Forward host clipboard data to an internal client's fd.
-    pub fn receive_from_host(&mut self, target: SelectionTarget, mime_type: &str, fd: OwnedFd) {
-        let offer = match target {
-            SelectionTarget::Clipboard => self.inner.clipboard_offer.as_ref(),
-            SelectionTarget::Primary => self.inner.primary_offer.as_ref(),
+    fn receive_from_host(&mut self, kind: SelectionKind, mime_type: &str, fd: OwnedFd) {
+        let offer = match kind {
+            SelectionKind::Clipboard => self.inner.clipboard_offer.as_ref(),
+            SelectionKind::Primary => self.inner.primary_offer.as_ref(),
         };
         if let Some(offer) = offer {
             offer.receive(mime_type.to_string(), fd.as_fd());
             self.flush();
         } else {
-            tracing::warn!("receive_from_host: no active {target:?} offer, fd dropped");
+            tracing::warn!("receive_from_host: no active {kind:?} offer, fd dropped");
         }
     }
 
-    /// Advertise an internal client's selection to the host compositor.
-    pub fn set_host_selection(&mut self, target: SelectionTarget, mime_types: &[String]) {
+    fn set_host_selection(&mut self, kind: SelectionKind, mime_types: &[String]) {
         let Some(ref manager) = self.inner.manager else {
             return;
         };
@@ -491,9 +429,9 @@ impl ClipboardProxy {
         };
 
         let qh = self.queue.handle();
-        let role = match target {
-            SelectionTarget::Clipboard => SourceRole::Clipboard,
-            SelectionTarget::Primary => SourceRole::Primary,
+        let role = match kind {
+            SelectionKind::Clipboard => SourceRole::Clipboard,
+            SelectionKind::Primary => SourceRole::Primary,
         };
 
         let source = manager.create_data_source(&qh, role);
@@ -501,11 +439,11 @@ impl ClipboardProxy {
             source.offer(mime.clone());
         }
 
-        match target {
-            SelectionTarget::Clipboard => device.set_selection(Some(&source)),
-            SelectionTarget::Primary => device.set_primary_selection(Some(&source)),
+        match kind {
+            SelectionKind::Clipboard => device.set_selection(Some(&source)),
+            SelectionKind::Primary => device.set_primary_selection(Some(&source)),
         }
-        let (source_slot, suppress) = self.inner.source_and_suppress(target);
+        let (source_slot, suppress) = self.inner.source_and_suppress(kind);
         if let Some(old) = source_slot.replace(source) {
             old.destroy();
         }
@@ -513,53 +451,21 @@ impl ClipboardProxy {
         self.flush();
     }
 
-    /// Clear our selection on the host (when an internal client clears selection).
-    pub fn clear_host_selection(&mut self, target: SelectionTarget) {
+    fn clear_host_selection(&mut self, kind: SelectionKind) {
         let Some(ref device) = self.inner.device else {
             return;
         };
 
-        match target {
-            SelectionTarget::Clipboard => device.set_selection(None),
-            SelectionTarget::Primary => device.set_primary_selection(None),
+        match kind {
+            SelectionKind::Clipboard => device.set_selection(None),
+            SelectionKind::Primary => device.set_primary_selection(None),
         }
-        let (source_slot, suppress) = self.inner.source_and_suppress(target);
+        let (source_slot, suppress) = self.inner.source_and_suppress(kind);
         if let Some(old) = source_slot.take() {
             old.destroy();
         }
         *suppress += 1;
         self.flush();
-    }
-}
-
-impl ClipboardBackend for ClipboardProxy {
-    fn dispatch(&mut self) {
-        self.dispatch();
-    }
-
-    fn take_events(&mut self) -> Vec<ClipboardEvent> {
-        self.take_events()
-    }
-
-    fn connection_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        self.connection_fd()
-    }
-
-    fn receive_from_host(
-        &mut self,
-        target: SelectionTarget,
-        mime_type: &str,
-        fd: std::os::fd::OwnedFd,
-    ) {
-        self.receive_from_host(target, mime_type, fd);
-    }
-
-    fn set_host_selection(&mut self, target: SelectionTarget, mime_types: &[String]) {
-        self.set_host_selection(target, mime_types);
-    }
-
-    fn clear_host_selection(&mut self, target: SelectionTarget) {
-        self.clear_host_selection(target);
     }
 }
 
@@ -646,11 +552,11 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for ClipboardState {
         match event {
             Event::DataOffer { id } => state.on_data_offer(id.id()),
             Event::Selection { id } => state.on_selection(
-                SelectionTarget::Clipboard,
+                SelectionKind::Clipboard,
                 id.map(DataControlOffer::ExtDataControl),
             ),
             Event::PrimarySelection { id } => state.on_selection(
-                SelectionTarget::Primary,
+                SelectionKind::Primary,
                 id.map(DataControlOffer::ExtDataControl),
             ),
             Event::Finished => state.on_device_finished(),
@@ -727,11 +633,11 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for ClipboardState {
         match event {
             Event::DataOffer { id } => state.on_data_offer(id.id()),
             Event::Selection { id } => state.on_selection(
-                SelectionTarget::Clipboard,
+                SelectionKind::Clipboard,
                 id.map(DataControlOffer::WlrDataControl),
             ),
             Event::PrimarySelection { id } => state.on_selection(
-                SelectionTarget::Primary,
+                SelectionKind::Primary,
                 id.map(DataControlOffer::WlrDataControl),
             ),
             Event::Finished => state.on_device_finished(),
