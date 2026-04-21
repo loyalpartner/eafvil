@@ -97,12 +97,6 @@ fn inject_host_selection(
         clear_primary_selection, set_primary_selection,
     };
 
-    // Cache host mime types for replay when XWM becomes ready.
-    match target {
-        SelectionTarget::Clipboard => state.selection.host_clipboard_mimes = mime_types.clone(),
-        SelectionTarget::Primary => state.selection.host_primary_mimes = mime_types.clone(),
-    }
-
     if mime_types.is_empty() {
         tracing::debug!("Host {target:?} cleared");
         match target {
@@ -115,18 +109,8 @@ fn inject_host_selection(
                 state.selection.primary_origin = SelectionOrigin::default();
             }
         }
-        if let Some(ref mut xwm) = state.xwm {
-            if let Err(e) = xwm.new_selection(target, None) {
-                tracing::warn!("X11 clear {target:?} selection failed: {e}");
-            }
-        }
     } else {
         tracing::debug!("Host {target:?} changed ({} types)", mime_types.len());
-        if let Some(ref mut xwm) = state.xwm {
-            if let Err(e) = xwm.new_selection(target, Some(mime_types.clone())) {
-                tracing::warn!("X11 set {target:?} selection failed: {e}");
-            }
-        }
         match target {
             SelectionTarget::Clipboard => {
                 set_data_device_selection(&state.display_handle, &state.seat, mime_types, ());
@@ -168,15 +152,6 @@ fn forward_client_selection(
             };
             if let Err(e) = result {
                 tracing::warn!("Failed to forward {target:?} selection to host: {e}");
-            }
-        }
-        SelectionOrigin::X11 => {
-            if let Some(ref mut xwm) = state.xwm {
-                if let Err(e) = xwm.send_selection(target, mime_type, fd) {
-                    tracing::warn!("Failed to forward X11 {target:?} selection to host: {e}");
-                }
-            } else {
-                tracing::warn!("X11 {target:?} selection requested but XWM unavailable");
             }
         }
         SelectionOrigin::Host => {

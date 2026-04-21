@@ -2,8 +2,7 @@ use clap::Parser;
 use include_dir::{include_dir, Dir};
 use smithay::reexports::wayland_server::Display;
 
-use emskin::xwayland_satellite::XwaylandBackend;
-use emskin::{cursor_x11, ipc, state, EmskinState};
+use emskin::{ipc, state, EmskinState};
 use emskin_clipboard::{BackendHint, ClipboardBackend};
 
 static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../elisp");
@@ -76,26 +75,17 @@ struct Cli {
     #[arg(long)]
     log_file: Option<std::path::PathBuf>,
 
-    /// Pin the XWayland DISPLAY number (passed through to
-    /// `XWayland::spawn`). Without this, smithay scans
-    /// `/tmp/.X11-unix/X0..X32` for a free slot — which races when
-    /// multiple emskin instances start in parallel (e.g. E2E tests with
+    /// Pin the XWayland DISPLAY number that emskin asks
+    /// xwayland-satellite to claim. Without this, the supervisor
+    /// scans `/tmp/.X{0..N}-lock` from 0 for a free slot — which races
+    /// when multiple emskin instances start in parallel (E2E tests with
     /// default `--test-threads`). The test harness uses this to
     /// pre-allocate a unique number per test.
     #[arg(long)]
     xwayland_display: Option<u32>,
 
-    /// Which backend provides XWayland. `smithay` (default) embeds
-    /// smithay's `X11Wm`. `satellite` uses the external
-    /// `xwayland-satellite` process with niri-style on-demand spawn
-    /// (issue #50). The satellite path is under evaluation; switch with
-    /// care.
-    #[arg(long, value_enum, default_value_t = XwaylandBackend::Smithay)]
-    xwayland_backend: XwaylandBackend,
-
-    /// Path to the `xwayland-satellite` binary (only used with
-    /// `--xwayland-backend=satellite`). Defaults to the binary on
-    /// `$PATH`.
+    /// Path to the `xwayland-satellite` binary. Defaults to the binary
+    /// found on `$PATH`.
     #[arg(long, default_value = "xwayland-satellite")]
     xwayland_satellite_bin: std::path::PathBuf,
 }
@@ -194,19 +184,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    match cli.xwayland_backend {
-        XwaylandBackend::Smithay => {
-            start_xwayland(event_loop.handle(), &mut state, cli.xwayland_display);
-        }
-        XwaylandBackend::Satellite => {
-            start_xwayland_satellite(
-                event_loop.handle(),
-                &mut state,
-                cli.xwayland_display.unwrap_or(0),
-                &cli.xwayland_satellite_bin,
-            );
-        }
-    }
+    start_xwayland_satellite(
+        event_loop.handle(),
+        &mut state,
+        cli.xwayland_display.unwrap_or(0),
+        &cli.xwayland_satellite_bin,
+    );
 
     // Launch the external workspace bar (if configured). Done after the
     // Wayland socket exists so the child inherits WAYLAND_DISPLAY via the
@@ -426,8 +409,6 @@ fn default_ipc_path() -> std::path::PathBuf {
 /// satellite crashes are handled transparently: the spawner thread
 /// observes the exit, sends `ToMain::Rearm` through a calloop channel,
 /// and the main loop re-installs the socket watch.
-///
-/// Called only when `--xwayland-backend=satellite`. See issue #50.
 fn start_xwayland_satellite(
     handle: smithay::reexports::calloop::LoopHandle<'static, EmskinState>,
     state: &mut EmskinState,
@@ -511,101 +492,6 @@ fn start_xwayland_satellite(
     // Spawn pending Emacs now that both WAYLAND_DISPLAY and DISPLAY are set.
     if let Some(pc) = state.pending_command.take() {
         spawn_child(&pc.command, &pc.args, display, pc.standalone, state);
-    }
-}
-
-fn start_xwayland(
-    handle: smithay::reexports::calloop::LoopHandle<'static, EmskinState>,
-    state: &mut EmskinState,
-    display: Option<u32>,
-) {
-    use smithay::xwayland::{XWayland, XWaylandEvent};
-
-    let dh = state.display_handle.clone();
-
-    let (xwayland, client) = match XWayland::spawn(
-        &dh,
-        display,
-        std::iter::empty::<(String, String)>(),
-        true,
-        std::process::Stdio::null(),
-        std::process::Stdio::null(),
-        |_| (),
-    ) {
-        Ok(res) => res,
-        Err(e) => {
-            tracing::error!("Failed to start XWayland: {e}");
-            return;
-        }
-    };
-
-    let inner_handle = handle.clone();
-    if let Err(e) = handle.insert_source(xwayland, move |event, _, state| match event {
-        XWaylandEvent::Ready {
-            x11_socket,
-            display_number,
-        } => {
-            let wm = smithay::xwayland::X11Wm::start_wm(
-                inner_handle.clone(),
-                &dh,
-                x11_socket,
-                client.clone(),
-            );
-            match wm {
-                Ok(wm) => {
-                    state.xwm = Some(wm);
-                    state.xdisplay = Some(display_number);
-                    std::env::set_var("DISPLAY", format!(":{display_number}"));
-                    state.ipc.send(ipc::OutgoingMessage::XWaylandReady {
-                        display: display_number,
-                    });
-                    tracing::info!("XWayland ready on :{display_number}");
-
-                    // Replay cached host selections so X11 clients can paste
-                    // content that was set before XWM was ready.
-                    {
-                        use smithay::wayland::selection::SelectionTarget;
-                        let pairs = [
-                            (
-                                SelectionTarget::Clipboard,
-                                &state.selection.host_clipboard_mimes,
-                            ),
-                            (
-                                SelectionTarget::Primary,
-                                &state.selection.host_primary_mimes,
-                            ),
-                        ];
-                        for (target, mimes) in pairs {
-                            if !mimes.is_empty() {
-                                if let Some(ref mut xwm) = state.xwm {
-                                    if let Err(e) = xwm.new_selection(target, Some(mimes.clone())) {
-                                        tracing::warn!("X11 replay {target:?} failed: {e}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Initialize X11 cursor tracker for XWayland cursor forwarding.
-                    if let Some(tracker) = cursor_x11::X11CursorTracker::new(display_number) {
-                        state.x11_cursor_tracker = Some(tracker);
-                    }
-
-                    // Spawn child now that both WAYLAND_DISPLAY and DISPLAY are set.
-                    if let Some(pc) = state.pending_command.take() {
-                        spawn_child(&pc.command, &pc.args, display_number, pc.standalone, state);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to start X11 WM: {e}");
-                }
-            }
-        }
-        XWaylandEvent::Error => {
-            tracing::warn!("XWayland crashed on startup");
-        }
-    }) {
-        tracing::error!("Failed to insert XWayland source: {e}");
     }
 }
 

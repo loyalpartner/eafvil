@@ -35,9 +35,7 @@ use smithay::{
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
-        xwayland_shell::XWaylandShellState,
     },
-    xwayland::X11Wm,
 };
 
 use smithay::reexports::wayland_server::Resource;
@@ -47,9 +45,10 @@ use smithay::wayland::seat::WaylandFocus;
 /// routed to the correct data source.
 ///
 /// - `Wayland`: a wayland client on emskin owns a data source that can
-///   be pulled via `request_data_device_client_selection`.
-/// - `X11`: an X client on emskin's XWayland owns the selection; pull
-///   from it via `xwm.send_selection`.
+///   be pulled via `request_data_device_client_selection`. X clients
+///   running under `xwayland-satellite` also fall into this variant —
+///   satellite translates X selections into Wayland data sources before
+///   they ever reach emskin.
 /// - `Host`: emskin received the selection from the host compositor
 ///   via `inject_host_selection` and holds only an offer — actual data
 ///   must be pulled back from the host via `ClipboardProxy`.
@@ -57,7 +56,6 @@ use smithay::wayland::seat::WaylandFocus;
 pub enum SelectionOrigin {
     #[default]
     Wayland,
-    X11,
     Host,
 }
 
@@ -85,10 +83,6 @@ pub struct SelectionState {
     pub clipboard_origin: SelectionOrigin,
     /// Where the current primary selection came from.
     pub primary_origin: SelectionOrigin,
-    /// Cached host clipboard mime types for XWM replay.
-    pub host_clipboard_mimes: Vec<String>,
-    /// Cached host primary mime types for XWM replay.
-    pub host_primary_mimes: Vec<String>,
 }
 
 /// Smithay Wayland protocol state — pure bookkeeping for compositor protocols.
@@ -104,7 +98,6 @@ pub struct WaylandState {
     pub viewporter_state: ViewporterState,
     pub xdg_decoration_state: XdgDecorationState,
     pub layer_shell_state: WlrLayerShellState,
-    pub xwayland_shell_state: XWaylandShellState,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     /// Advertise `zwlr_data_control_v1` and `ext_data_control_v1` to
     /// emskin's own internal clients so they can exchange selections
@@ -137,7 +130,6 @@ pub struct PendingCommand {
 pub struct Workspace {
     pub space: Space<Window>,
     pub emacs_surface: Option<WlSurface>,
-    pub emacs_x11_window: Option<Window>,
     /// Display name for the bar (extracted from Emacs frame title).
     pub name: String,
 }
@@ -176,14 +168,11 @@ pub struct EmskinState {
     // Smithay protocol state (grouped for clarity).
     pub wl: WaylandState,
 
-    // XWayland
-    pub xwm: Option<X11Wm>,
+    // XWayland: `xwls` owns the pre-bound X11 sockets and lazily
+    // spawns an external `xwayland-satellite` process on X client
+    // connect. `xdisplay` caches the `:N` number for convenience
+    // (exported as DISPLAY, sent to Emacs via IPC).
     pub xdisplay: Option<u32>,
-    pub x11_cursor_tracker: Option<crate::cursor_x11::X11CursorTracker>,
-    /// niri-style xwayland-satellite integration (used when
-    /// `--xwayland-backend=satellite`). `None` when the default smithay
-    /// X11Wm path is in use. Set at startup only; never swapped during
-    /// run.
     pub xwls: Option<crate::xwayland_satellite::XwlsIntegration>,
 
     pub seat: Seat<Self>,
@@ -191,10 +180,6 @@ pub struct EmskinState {
     // --- emskin specific ---
     /// The Emacs surface (first toplevel to connect)
     pub emacs_surface: Option<WlSurface>,
-
-    /// X11 Emacs window — kept to poll for wl_surface after map (XWayland
-    /// associates the surface asynchronously via xwayland_shell protocol).
-    pub emacs_x11_window: Option<Window>,
 
     /// Whether the initial size has been configured.
     /// Set to true once Emacs receives the host window size in its first configure.
@@ -314,7 +299,6 @@ impl EmskinState {
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
-        let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
         let text_input_manager_state =
             smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
@@ -415,7 +399,6 @@ impl EmskinState {
                 viewporter_state,
                 xdg_decoration_state,
                 layer_shell_state,
-                xwayland_shell_state,
                 cursor_shape_manager_state,
                 wlr_data_control_state,
                 ext_data_control_state,
@@ -426,15 +409,12 @@ impl EmskinState {
                 relative_pointer_manager_state,
                 popups,
             },
-            xwm: None,
             xdisplay: None,
-            x11_cursor_tracker: None,
             xwls: None,
             seat,
 
             // emskin specific
             emacs_surface: None,
-            emacs_x11_window: None,
             initial_size_settled: false,
             detect_emacs: std::env::var_os("EMSKIN_DISABLE_EMACS_DETECTION").is_none(),
             emacs_child: None,
@@ -564,13 +544,11 @@ impl EmskinState {
         Some(self.usable_area())
     }
 
-    /// The Emacs toplevel `Window`, regardless of Wayland/X11 flavour.
-    /// X11 Emacs is stored directly; Wayland Emacs is looked up by its
-    /// `wl_surface` in the active workspace `Space`.
+    /// The Emacs toplevel `Window`, looked up by its `wl_surface` in the
+    /// active workspace `Space`. Under xwayland-satellite every client —
+    /// including gtk3 Emacs over XWayland — presents as a Wayland
+    /// toplevel, so there is no separate X11 branch.
     pub fn emacs_window(&self) -> Option<Window> {
-        if let Some(ref win) = self.emacs_x11_window {
-            return Some(win.clone());
-        }
         let surface = self.emacs_surface.as_ref()?;
         self.space
             .elements()
@@ -578,19 +556,17 @@ impl EmskinState {
             .cloned()
     }
 
-    /// The Emacs focus target (Wayland toplevel or X11 window).
+    /// The Emacs focus target.
     pub fn emacs_focus_target(&self) -> Option<crate::KeyboardFocusTarget> {
         self.emacs_window().map(crate::KeyboardFocusTarget::from)
     }
 
     /// Apply the window-manager's auto-focus policy when a new embedded
     /// toplevel maps: grant keyboard focus + notify Emacs — unless a
-    /// prefix-key sequence is in flight (C-x / C-c / M-x) or the X11
-    /// client declines input (ICCCM `WM_HINTS.input = False`).
+    /// prefix-key sequence is in flight (C-x / C-c / M-x).
     ///
-    /// One entry point for both Wayland (`xdg_shell::new_toplevel`) and
-    /// X11 (`xwayland::map_window_request`) paths — mirrors sway's
-    /// `view_map()` → `input_manager_set_focus()` pipeline.
+    /// Mirrors sway's `view_map()` → `input_manager_set_focus()`
+    /// pipeline. Single entry point for xdg_shell `new_toplevel`.
     pub fn auto_focus_new_window(&mut self, window: Window, window_id: u64) {
         let focus_view = crate::ipc::OutgoingMessage::FocusView {
             window_id,
@@ -603,16 +579,6 @@ impl EmskinState {
         if self.focus.prefix_saved_focus.is_some() {
             self.ipc.send(focus_view);
             return;
-        }
-
-        // X11 input-hint check — windows like splashes and tooltips
-        // explicitly decline keyboard input.
-        if let Some(x11) = window.x11_surface() {
-            if x11.input_model() == smithay::xwayland::xwm::WmInputModel::None {
-                tracing::debug!("auto_focus_new_window: X11 window_id={window_id} declines input");
-                self.ipc.send(focus_view);
-                return;
-            }
         }
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -742,21 +708,18 @@ impl EmskinState {
         // Swap: current active → inactive, target → active.
         let old_space = std::mem::take(&mut self.space);
         let old_emacs = self.emacs_surface.take();
-        let old_x11 = self.emacs_x11_window.take();
         let old_name = std::mem::take(&mut self.active_workspace_name);
         self.inactive_workspaces.insert(
             self.active_workspace_id,
             Workspace {
                 space: old_space,
                 emacs_surface: old_emacs,
-                emacs_x11_window: old_x11,
                 name: old_name,
             },
         );
 
         self.space = target.space;
         self.emacs_surface = target.emacs_surface.take();
-        self.emacs_x11_window = target.emacs_x11_window.take();
         self.active_workspace_name = target.name;
         self.active_workspace_id = target_id;
 
@@ -960,12 +923,11 @@ impl EmskinState {
 
         // Active workspace's Emacs surface lives in self.space.
         let active_emacs = self.emacs_surface.clone();
-        let active_x11 = self.emacs_x11_window.clone();
-        resize_emacs_in_space(&mut self.space, &active_emacs, &active_x11, geo);
+        resize_emacs_in_space(&mut self.space, &active_emacs, geo);
 
         // Inactive workspaces each hold their own space + Emacs.
         for ws in self.inactive_workspaces.values_mut() {
-            resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, &ws.emacs_x11_window, geo);
+            resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, geo);
         }
 
         // Tell Emacs its new surface size so elisp's sync path picks up the
@@ -980,38 +942,30 @@ impl EmskinState {
     }
 }
 
-/// Resize and reposition the Emacs window in a given space.
-/// Handles both Wayland (pgtk) and X11 (gtk3 via XWayland) paths.
+/// Resize and reposition the Emacs window in a given space. Both pgtk
+/// and gtk3 Emacs present as Wayland toplevels (gtk3 goes through
+/// xwayland-satellite which translates X11 into Wayland before emskin
+/// ever sees the client), so there is a single code path here.
 pub fn resize_emacs_in_space(
     space: &mut Space<Window>,
     emacs_surface: &Option<WlSurface>,
-    emacs_x11_window: &Option<Window>,
     geo: Rectangle<i32, Logical>,
 ) {
-    // Wayland (pgtk) path.
-    if let Some(ref emacs) = emacs_surface {
-        let win = space
-            .elements()
-            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == emacs))
-            .cloned();
-        if let Some(window) = win {
-            if let Some(toplevel) = window.toplevel() {
-                toplevel.with_pending_state(|s| {
-                    s.size = Some(geo.size);
-                });
-                toplevel.send_pending_configure();
-            }
-            space.map_element(window, geo.loc, false);
-            return;
+    let Some(ref emacs) = emacs_surface else {
+        return;
+    };
+    let win = space
+        .elements()
+        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == emacs))
+        .cloned();
+    if let Some(window) = win {
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|s| {
+                s.size = Some(geo.size);
+            });
+            toplevel.send_pending_configure();
         }
-    }
-    // X11 (gtk3) path.
-    if let Some(ref win) = emacs_x11_window {
-        if let Some(x11) = win.x11_surface() {
-            if let Err(e) = x11.configure(geo) {
-                tracing::warn!("X11 Emacs resize failed: {e}");
-            }
-        }
+        space.map_element(window, geo.loc, false);
     }
 }
 

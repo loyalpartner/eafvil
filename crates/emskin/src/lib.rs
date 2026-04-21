@@ -1,7 +1,6 @@
 pub mod apps;
 pub mod capture;
 pub mod clipboard_bridge;
-pub mod cursor_x11;
 pub mod focus;
 pub mod handlers;
 pub mod input;
@@ -11,7 +10,6 @@ pub mod protocols;
 pub mod recording;
 pub mod state;
 pub mod tick;
-pub mod utils;
 pub mod winit;
 pub mod xwayland_satellite;
 

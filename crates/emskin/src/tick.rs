@@ -134,7 +134,6 @@ fn process_pending_toplevels(state: &mut EmskinState) {
                 Workspace {
                     space: new_space,
                     emacs_surface: Some(emacs_wl),
-                    emacs_x11_window: None,
                     name: String::new(),
                 },
             );

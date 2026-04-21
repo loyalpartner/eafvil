@@ -6,4 +6,3 @@ mod pointer_constraints;
 mod seat;
 mod selection;
 mod xdg_shell;
-mod xwayland;

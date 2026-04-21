@@ -494,10 +494,9 @@ impl Compositor {
         Self::spawn_on_impl(host, &[], &[])
     }
 
-    /// Spawn emskin on `host` with `--xwayland-backend=satellite` and
-    /// the given satellite binary. Matches niri's runtime flow — emskin
-    /// pre-binds the X11 sockets and spawns the satellite lazily on X
-    /// client connect.
+    /// Spawn emskin on `host` pointing `--xwayland-satellite-bin` at the
+    /// given binary. Matches niri's runtime flow — emskin pre-binds the
+    /// X11 sockets and spawns the satellite lazily on X client connect.
     ///
     /// `extra_env` is forwarded into emskin's environment; emskin in turn
     /// inherits it into the satellite child, letting tests plant hooks
@@ -513,12 +512,7 @@ impl Compositor {
             .to_owned();
         Self::spawn_on_impl(
             host,
-            &[
-                "--xwayland-backend".to_owned(),
-                "satellite".to_owned(),
-                "--xwayland-satellite-bin".to_owned(),
-                bin_str,
-            ],
+            &["--xwayland-satellite-bin".to_owned(), bin_str],
             extra_env,
         )
     }

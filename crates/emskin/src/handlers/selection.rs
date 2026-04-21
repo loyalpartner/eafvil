@@ -48,16 +48,10 @@ impl SelectionHandler for EmskinState {
                 self.start_time.elapsed().as_secs_f32(),
             );
 
-            // Internal bridge (anvil pattern): tell the X11 side a wayland
-            // client owns the selection so X clients can paste. Unconditional
-            // — X clients inside emskin should always see each other's
-            // wayland copies, even before Emacs IPC connects.
-            if let Some(ref mut xwm) = self.xwm {
-                if let Err(e) = xwm.new_selection(ty, Some(mime_types.clone())) {
-                    tracing::warn!("propagating wayland {ty:?} selection to X failed: {e}");
-                }
-            }
-
+            // Under xwayland-satellite, X clients show up as ordinary
+            // Wayland clients on emskin's data_device, so there is no
+            // dedicated X-side propagation to do — smithay handles
+            // peer-to-peer routing automatically.
             match ty {
                 SelectionTarget::Clipboard => {
                     self.selection.clipboard_origin = crate::state::SelectionOrigin::Wayland
@@ -78,11 +72,6 @@ impl SelectionHandler for EmskinState {
             }
         } else {
             tracing::debug!("Internal selection cleared ({ty:?})");
-            if let Some(ref mut xwm) = self.xwm {
-                if let Err(e) = xwm.new_selection(ty, None) {
-                    tracing::warn!("clearing X {ty:?} selection failed: {e}");
-                }
-            }
             if let Some(ref mut clipboard) = self.selection.clipboard {
                 clipboard.clear_host_selection(ty.to_kind());
             }
@@ -113,16 +102,6 @@ impl SelectionHandler for EmskinState {
                     "Wayland paste origin=Wayland — smithay routes internally, dropping fd"
                 );
                 drop(fd);
-            }
-            SelectionOrigin::X11 => {
-                if let Some(ref mut xwm) = self.xwm {
-                    if let Err(e) = xwm.send_selection(ty, mime_type, fd) {
-                        tracing::warn!("wayland paste from X source failed: {e}");
-                    }
-                } else {
-                    tracing::warn!("Wayland paste origin=X11 but XWM unavailable; dropping fd");
-                    drop(fd);
-                }
             }
             SelectionOrigin::Host => {
                 if let Some(ref mut clipboard) = self.selection.clipboard {
