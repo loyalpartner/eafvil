@@ -48,6 +48,7 @@ that type to nest into.
 | KDE     | ✓               | ✓           |
 | Sway    | ✓               | n/a         |
 | COSMIC  | ✓               | n/a         |
+| niri    | ✓               | n/a         |
 | i3wm    | n/a             | ✓           |
 
 pgtk Emacs (`--with-pgtk`) is recommended. GTK3 X11 Emacs also works via XWayland.
