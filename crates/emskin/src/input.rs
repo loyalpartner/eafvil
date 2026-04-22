@@ -85,10 +85,10 @@ impl EmskinState {
             InputEvent::PointerMotion { .. } => {}
 
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let Some(output) = self.space.outputs().next() else {
+                let Some(output) = self.workspace.active_space.outputs().next() else {
                     return;
                 };
-                let Some(output_geo) = self.space.output_geometry(output) else {
+                let Some(output_geo) = self.workspace.active_space.output_geometry(output) else {
                     return;
                 };
                 let Some(pointer) = self.seat.get_pointer() else {
@@ -288,7 +288,7 @@ impl EmskinState {
                     // Left-click on an embedded app → tell Emacs to select that window.
                     if event.button() == Some(MouseButton::Left) {
                         if let Some((window_id, view_id, _)) =
-                            self.apps.mirror_under(pos, self.active_workspace_id)
+                            self.apps.mirror_under(pos, self.workspace.active_id)
                         {
                             self.ipc.send(crate::ipc::OutgoingMessage::FocusView {
                                 window_id,

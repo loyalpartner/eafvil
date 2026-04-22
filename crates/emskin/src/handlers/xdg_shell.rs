@@ -33,7 +33,7 @@ impl XdgShellHandler for EmskinState {
             tracing::info!("Emacs toplevel connected");
             self.emacs_surface = Some(surface.wl_surface().clone());
 
-            if let Some(output) = self.space.outputs().next() {
+            if let Some(output) = self.workspace.active_space.outputs().next() {
                 if let Some(mode) = output.current_mode() {
                     let scale = output.current_scale().fractional_scale();
                     let logical = mode.size.to_f64().to_logical(scale).to_i32_round();
@@ -50,11 +50,13 @@ impl XdgShellHandler for EmskinState {
             self.initial_size_settled = true;
 
             let window = Window::new_wayland_window(surface);
-            self.space.map_element(window.clone(), (0, 0), false);
+            self.workspace
+                .active_space
+                .map_element(window.clone(), (0, 0), false);
             // Emacs is the fullscreen host and must stay at the bottom of
             // the stack so later app toplevels (and any remap via
             // resize_emacs_in_space) never cover them.
-            self.space.lower_element(&window);
+            self.workspace.active_space.lower_element(&window);
 
             // Give Emacs initial keyboard focus.
             let serial = SERIAL_COUNTER.next_serial();
@@ -83,12 +85,16 @@ impl XdgShellHandler for EmskinState {
                 surface.send_configure();
             }
             let window = Window::new_wayland_window(surface.clone());
-            self.space.map_element(window.clone(), (0, 0), false);
+            self.workspace
+                .active_space
+                .map_element(window.clone(), (0, 0), false);
             // Keep Emacs at the bottom while it sits briefly in the active
             // space before `process_pending_toplevels` decides whether to
             // move it into a new workspace.
-            self.space.lower_element(&window);
-            self.pending_emacs_toplevels.push((surface, window));
+            self.workspace.active_space.lower_element(&window);
+            self.workspace
+                .pending_emacs_toplevels
+                .push((surface, window));
             tracing::info!("Emacs client toplevel detected — deferred for parent check");
         } else {
             // Subsequent toplevels from other clients = embedded app windows.
@@ -108,11 +114,13 @@ impl XdgShellHandler for EmskinState {
 
             let window = Window::new_wayland_window(surface);
             // Map at 1×1 so on_commit() and initial configure work.
-            self.space.map_element(window.clone(), (0, 0), false);
+            self.workspace
+                .active_space
+                .map_element(window.clone(), (0, 0), false);
             self.apps.insert(crate::apps::AppWindow {
                 window_id,
                 window: window.clone(),
-                workspace_id: self.active_workspace_id,
+                workspace_id: self.workspace.active_id,
                 geometry: None,
                 pending_geometry: None,
                 pending_since: None,
@@ -258,14 +266,14 @@ impl XdgShellHandler for EmskinState {
             // Active workspace Emacs — forward title to host window + update bar name.
             if let Some(title) = title {
                 tracing::debug!("Emacs title changed: {title}");
-                self.active_workspace_name = extract_bar_name(&title);
+                self.workspace.active_name = extract_bar_name(&title);
                 self.emacs_title = Some(title);
             }
         } else if self.is_any_emacs_surface(surface.wl_surface()) {
             // Inactive workspace Emacs frame — update its workspace name.
             if let Some(title) = &title {
                 let short = extract_bar_name(title);
-                for ws in self.inactive_workspaces.values_mut() {
+                for ws in self.workspace.inactive.values_mut() {
                     if ws
                         .emacs_surface
                         .as_ref()
@@ -416,20 +424,21 @@ impl EmskinState {
             return;
         };
         let Some(window) = self
-            .space
+            .workspace
+            .active_space
             .elements()
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &root))
         else {
             return;
         };
 
-        let Some(output) = self.space.outputs().next() else {
+        let Some(output) = self.workspace.active_space.outputs().next() else {
             return;
         };
-        let Some(output_geo) = self.space.output_geometry(output) else {
+        let Some(output_geo) = self.workspace.active_space.output_geometry(output) else {
             return;
         };
-        let Some(window_geo) = self.space.element_geometry(window) else {
+        let Some(window_geo) = self.workspace.active_space.element_geometry(window) else {
             return;
         };
 

@@ -12,6 +12,7 @@ pub mod recording;
 pub mod state;
 pub mod tick;
 pub mod winit;
+pub mod workspace;
 pub mod xwayland_satellite;
 
 pub use focus::KeyboardFocusTarget;

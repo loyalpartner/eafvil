@@ -30,7 +30,7 @@ use smithay::{
         },
         shell::{
             wlr_layer::WlrLayerShellState,
-            xdg::{decoration::XdgDecorationState, ToplevelSurface, XdgShellState},
+            xdg::{decoration::XdgDecorationState, XdgShellState},
         },
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -124,14 +124,6 @@ pub struct PendingCommand {
     pub standalone: bool,
 }
 
-/// Stored state for an inactive workspace (swapped out when another is active).
-pub struct Workspace {
-    pub space: Space<Window>,
-    pub emacs_surface: Option<WlSurface>,
-    /// Display name for the bar (extracted from Emacs frame title).
-    pub name: String,
-}
-
 pub struct EmskinState {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -140,21 +132,8 @@ pub struct EmskinState {
     pub ipc: crate::ipc::IpcServer,
     pub apps: crate::apps::AppManager,
 
-    // --- Workspace management ---
-    /// The active workspace's space (swapped in/out on switch).
-    pub space: Space<Window>,
-    /// Inactive workspaces, keyed by workspace id.
-    pub inactive_workspaces: HashMap<u64, Workspace>,
-    /// The id of the currently active workspace.
-    pub active_workspace_id: u64,
-    /// Display name of the active workspace (from Emacs frame title).
-    pub active_workspace_name: String,
-    /// Next workspace id to allocate.
-    pub next_workspace_id: u64,
-    /// Emacs toplevels awaiting parent() check (child frame detection).
-    pub pending_emacs_toplevels: Vec<(ToplevelSurface, Window)>,
-    /// ext-workspace-v1 protocol state.
-    pub workspace_protocol: crate::protocols::workspace::WorkspaceProtocolState,
+    /// Workspace model: active + inactive Emacs frames.
+    pub workspace: crate::workspace::WorkspaceState,
 
     pub loop_signal: LoopSignal,
     pub loop_handle: LoopHandle<'static, EmskinState>,
@@ -373,13 +352,15 @@ impl EmskinState {
             ipc,
             apps: crate::apps::AppManager::default(),
 
-            space,
-            inactive_workspaces: HashMap::new(),
-            active_workspace_id: 1,
-            active_workspace_name: String::new(),
-            next_workspace_id: 2,
-            pending_emacs_toplevels: Vec::new(),
-            workspace_protocol,
+            workspace: crate::workspace::WorkspaceState {
+                active_space: space,
+                inactive: HashMap::new(),
+                active_id: 1,
+                active_name: String::new(),
+                next_id: 2,
+                pending_emacs_toplevels: Vec::new(),
+                protocol: workspace_protocol,
+            },
 
             loop_signal,
             loop_handle,
@@ -502,7 +483,7 @@ impl EmskinState {
 
     /// Fullscreen geometry for the primary output (logical pixels).
     pub fn output_fullscreen_geo(&self) -> Option<Rectangle<i32, Logical>> {
-        let output = self.space.outputs().next()?;
+        let output = self.workspace.active_space.outputs().next()?;
         let mode = output.current_mode()?;
         let scale = output.current_scale().fractional_scale();
         let logical = mode.size.to_f64().to_logical(scale).to_i32_round();
@@ -527,7 +508,7 @@ impl EmskinState {
     /// Delegates to smithay's `LayerMap::non_exclusive_zone()`; falls back to
     /// full output when no layers or no output.
     pub fn usable_area(&self) -> Rectangle<i32, Logical> {
-        let Some(output) = self.space.outputs().next() else {
+        let Some(output) = self.workspace.active_space.outputs().next() else {
             return Rectangle::default();
         };
         smithay::desktop::layer_map_for_output(output).non_exclusive_zone()
@@ -540,7 +521,7 @@ impl EmskinState {
     /// space by setting `exclusive_zone` on their layer surfaces and the
     /// geometry adjusts automatically.
     pub fn emacs_geometry(&self) -> Option<Rectangle<i32, Logical>> {
-        self.space.outputs().next()?;
+        self.workspace.active_space.outputs().next()?;
         Some(self.usable_area())
     }
 
@@ -550,7 +531,8 @@ impl EmskinState {
     /// toplevel, so there is no separate X11 branch.
     pub fn emacs_window(&self) -> Option<Window> {
         let surface = self.emacs_surface.as_ref()?;
-        self.space
+        self.workspace
+            .active_space
             .elements()
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
             .cloned()
@@ -595,14 +577,15 @@ impl EmskinState {
         &self,
         surface: &WlSurface,
     ) -> Option<crate::KeyboardFocusTarget> {
-        if let Some(output) = self.space.outputs().next() {
+        if let Some(output) = self.workspace.active_space.outputs().next() {
             let map = smithay::desktop::layer_map_for_output(output);
             if let Some(layer) = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL) {
                 return Some(crate::KeyboardFocusTarget::from(layer.clone()));
             }
         }
         if let Some(window) = self
-            .space
+            .workspace
+            .active_space
             .elements()
             .find(|w| w.wl_surface().as_deref().is_some_and(|s| s == surface))
             .cloned()
@@ -622,19 +605,19 @@ impl EmskinState {
             return false;
         };
         let old_ws = app.workspace_id;
-        if old_ws == self.active_workspace_id {
+        if old_ws == self.workspace.active_id {
             return false;
         }
         let window = app.window.clone();
         tracing::debug!(
             "app {window_id} migrating workspace {old_ws} → {}",
-            self.active_workspace_id
+            self.workspace.active_id
         );
-        if let Some(old_space) = self.space_for_workspace_mut(old_ws) {
+        if let Some(old_space) = self.workspace.space_for_mut(old_ws) {
             old_space.unmap_elem(&window);
         }
         if let Some(app) = self.apps.get_mut(window_id) {
-            app.workspace_id = self.active_workspace_id;
+            app.workspace_id = self.workspace.active_id;
             // Reset geometry so the next set_geometry immediately maps the app
             // instead of going through the pending path (which would deadlock:
             // app needs frame callbacks to commit, but it's not in any Space).
@@ -643,18 +626,6 @@ impl EmskinState {
             app.pending_since = None;
         }
         true
-    }
-
-    /// Allocate a new workspace id.
-    pub fn alloc_workspace_id(&mut self) -> u64 {
-        let id = self.next_workspace_id;
-        self.next_workspace_id += 1;
-        id
-    }
-
-    /// Total number of workspaces (active + inactive).
-    pub fn workspace_count(&self) -> usize {
-        1 + self.inactive_workspaces.len()
     }
 
     /// Check if a surface belongs to the same Wayland client as the active Emacs.
@@ -669,59 +640,39 @@ impl EmskinState {
         if self.emacs_surface.as_ref() == Some(surface) {
             return true;
         }
-        self.inactive_workspaces
+        self.workspace
+            .inactive
             .values()
             .any(|ws| ws.emacs_surface.as_ref() == Some(surface))
-    }
-
-    /// Get mutable reference to the space for a given workspace id.
-    /// Returns the active space if `ws_id` matches, otherwise looks up inactive.
-    pub fn space_for_workspace_mut(&mut self, ws_id: u64) -> Option<&mut Space<Window>> {
-        if ws_id == self.active_workspace_id {
-            Some(&mut self.space)
-        } else {
-            self.inactive_workspaces
-                .get_mut(&ws_id)
-                .map(|ws| &mut ws.space)
-        }
-    }
-
-    /// Sorted list of all workspace ids.
-    pub fn all_workspace_ids(&self) -> Vec<u64> {
-        let mut ids: Vec<u64> = std::iter::once(self.active_workspace_id)
-            .chain(self.inactive_workspaces.keys().copied())
-            .collect();
-        ids.sort_unstable();
-        ids
     }
 
     /// Switch the active workspace. Returns false if target is already active
     /// or doesn't exist.
     pub fn switch_workspace(&mut self, target_id: u64) -> bool {
-        if target_id == self.active_workspace_id {
+        if target_id == self.workspace.active_id {
             return false;
         }
-        let Some(mut target) = self.inactive_workspaces.remove(&target_id) else {
+        let Some(mut target) = self.workspace.inactive.remove(&target_id) else {
             return false;
         };
 
         // Swap: current active → inactive, target → active.
-        let old_space = std::mem::take(&mut self.space);
+        let old_space = std::mem::take(&mut self.workspace.active_space);
         let old_emacs = self.emacs_surface.take();
-        let old_name = std::mem::take(&mut self.active_workspace_name);
-        self.inactive_workspaces.insert(
-            self.active_workspace_id,
-            Workspace {
+        let old_name = std::mem::take(&mut self.workspace.active_name);
+        self.workspace.inactive.insert(
+            self.workspace.active_id,
+            crate::workspace::Workspace {
                 space: old_space,
                 emacs_surface: old_emacs,
                 name: old_name,
             },
         );
 
-        self.space = target.space;
+        self.workspace.active_space = target.space;
         self.emacs_surface = target.emacs_surface.take();
-        self.active_workspace_name = target.name;
-        self.active_workspace_id = target_id;
+        self.workspace.active_name = target.name;
+        self.workspace.active_id = target_id;
 
         // App migration is handled by IPC set_geometry from Emacs (sync-all).
         // The compositor does NOT auto-migrate because it doesn't know which
@@ -783,14 +734,14 @@ impl EmskinState {
 
         tracing::info!(
             "switched to workspace {target_id} (total={})",
-            self.workspace_count()
+            self.workspace.count()
         );
         true
     }
 
     /// Remove an inactive workspace and its embedded apps.
-    pub fn destroy_workspace(&mut self, workspace_id: u64) -> Option<Workspace> {
-        let ws = self.inactive_workspaces.remove(&workspace_id)?;
+    pub fn destroy_workspace(&mut self, workspace_id: u64) -> Option<crate::workspace::Workspace> {
+        let ws = self.workspace.inactive.remove(&workspace_id)?;
         // Remove all apps belonging to this workspace.
         let dead_app_ids: Vec<u64> = self
             .apps
@@ -807,7 +758,7 @@ impl EmskinState {
         }
         tracing::info!(
             "destroyed workspace {workspace_id} (total={})",
-            self.workspace_count()
+            self.workspace.count()
         );
         Some(ws)
     }
@@ -820,7 +771,7 @@ impl EmskinState {
         //    Use app.geometry (always available) instead of space.element_geometry
         //    because the source window may be unmapped (visible=false).
         if let Some((window_id, _view_id, mapped_pos)) =
-            self.apps.mirror_under(pos, self.active_workspace_id)
+            self.apps.mirror_under(pos, self.workspace.active_id)
         {
             if let Some(app) = self.apps.get(window_id) {
                 if let Some(geo) = app.geometry {
@@ -860,7 +811,8 @@ impl EmskinState {
         }
 
         // 3. Space elements.
-        self.space
+        self.workspace
+            .active_space
             .element_under(pos)
             .and_then(|(window, location)| {
                 window
@@ -876,7 +828,7 @@ impl EmskinState {
         use smithay::desktop::layer_map_for_output;
         use smithay::wayland::shell::wlr_layer::Layer;
 
-        let output = self.space.outputs().next()?;
+        let output = self.workspace.active_space.outputs().next()?;
         let map = layer_map_for_output(output);
 
         for layer in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
@@ -920,12 +872,12 @@ impl EmskinState {
             geo.size.h,
         );
 
-        // Active workspace's Emacs surface lives in self.space.
+        // Active workspace's Emacs surface lives in self.workspace.active_space.
         let active_emacs = self.emacs_surface.clone();
-        resize_emacs_in_space(&mut self.space, &active_emacs, geo);
+        resize_emacs_in_space(&mut self.workspace.active_space, &active_emacs, geo);
 
         // Inactive workspaces each hold their own space + Emacs.
-        for ws in self.inactive_workspaces.values_mut() {
+        for ws in self.workspace.inactive.values_mut() {
             resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, geo);
         }
 

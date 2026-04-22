@@ -228,7 +228,7 @@ fn render_frame(
             output,
             renderer,
             &mut framebuffer,
-            &state.space,
+            &state.workspace.active_space,
             &mut state.effect_chain,
             &effect_ctx,
             extras,
@@ -317,7 +317,7 @@ fn render_frame(
 }
 
 fn post_render(state: &mut EmskinState, output: &Output) {
-    state.space.elements().for_each(|window| {
+    state.workspace.active_space.elements().for_each(|window| {
         window.send_frame(
             output,
             state.start_time.elapsed(),
@@ -341,7 +341,7 @@ fn post_render(state: &mut EmskinState, output: &Output) {
         }
     }
 
-    state.space.refresh();
+    state.workspace.active_space.refresh();
     state.wl.popups.cleanup();
 
     if let Err(e) = state.display_handle.flush_clients() {
@@ -389,7 +389,7 @@ pub fn init_winit(
     );
     output.set_preferred(mode);
 
-    state.space.map_output(&output, (0, 0));
+    state.workspace.active_space.map_output(&output, (0, 0));
 
     init_dmabuf(&mut backend, state);
 
