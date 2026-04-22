@@ -65,11 +65,6 @@ pub struct FocusState {
     /// Saved keyboard focus before a prefix key redirect (C-x, C-c, M-x).
     /// `Some(focus)` = prefix active, restore `focus` when done; `None` = normal.
     pub prefix_saved_focus: Option<Option<crate::KeyboardFocusTarget>>,
-    /// Tracks text_input focus for manual enter/leave management. Kept as
-    /// `WlSurface` because text_input_v3 is a Wayland-only protocol.
-    pub text_input_focus: Option<WlSurface>,
-    /// Deferred `set_ime_allowed` for the winit window.
-    pub pending_ime_allowed: Option<bool>,
     /// Saved keyboard focus before a layer surface took it.
     pub layer_saved_focus: Option<crate::KeyboardFocusTarget>,
 }
@@ -110,7 +105,6 @@ pub struct WaylandState {
     pub dmabuf_state: DmabufState,
     /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
     pub dmabuf_global: Option<DmabufGlobal>,
-    pub text_input_manager_state: smithay::wayland::text_input::TextInputManagerState,
     /// Exposes `zwp_pointer_constraints_v1` — lock/confine pointer for games
     /// (Minecraft, Blender, browser Pointer Lock).
     pub pointer_constraints_state: PointerConstraintsState,
@@ -225,6 +219,9 @@ pub struct EmskinState {
     /// Focus management state.
     pub focus: FocusState,
 
+    /// IME (text_input_v3) bridge — host IME ↔ embedded Wayland clients.
+    pub ime: crate::ime::ImeBridge,
+
     /// Registered overlays driven by effect-core's `EffectChain`.
     pub effect_chain: effect_core::EffectChain,
 
@@ -300,8 +297,7 @@ impl EmskinState {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
-        let text_input_manager_state =
-            smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
+        let ime = crate::ime::ImeBridge::new(&dh);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
         let relative_pointer_manager_state = RelativePointerManagerState::new::<Self>(&dh);
         let dmabuf_state = DmabufState::new();
@@ -404,7 +400,6 @@ impl EmskinState {
                 ext_data_control_state,
                 dmabuf_state,
                 dmabuf_global: None,
-                text_input_manager_state,
                 pointer_constraints_state,
                 relative_pointer_manager_state,
                 popups,
@@ -427,6 +422,7 @@ impl EmskinState {
             pending_command: None,
             selection: SelectionState::default(),
             focus: FocusState::default(),
+            ime,
             effect_chain,
             measure,
             skeleton,
@@ -730,8 +726,7 @@ impl EmskinState {
         // Reset state that references the old workspace's surfaces.
         self.focus.prefix_saved_focus = None;
         self.focus.layer_saved_focus = None;
-        self.focus.text_input_focus = None;
-        self.focus.pending_ime_allowed = Some(false);
+        self.ime.reset_on_workspace_switch();
         // Reset skeleton state for the new workspace (window manager drives this,
         // not the effect trait).
         {

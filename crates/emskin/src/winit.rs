@@ -56,8 +56,8 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         backend.window().set_maximized(maximize);
     }
 
-    if let Some(allowed) = state.focus.pending_ime_allowed.take() {
-        backend.window().set_ime_allowed(allowed);
+    if let Some(enabled) = state.ime.take_ime_enabled() {
+        backend.window().set_ime_allowed(enabled);
     }
 
     if state.cursor_changed {
@@ -462,8 +462,10 @@ pub fn init_winit(
                     state.loop_signal.stop();
                 }
 
-                WinitEvent::Ime(ime) => {
-                    handle_ime_event(state, ime, backend.window());
+                WinitEvent::Ime(event) => {
+                    state
+                        .ime
+                        .on_host_ime_event(event, &state.seat, &state.apps, backend.window());
                     state.needs_redraw = true;
                 }
 
@@ -540,63 +542,4 @@ fn init_dmabuf(backend: &mut WinitGraphicsBackend<GlesRenderer>, state: &mut Ems
         }
     };
     state.wl.dmabuf_global = Some(global);
-}
-
-fn handle_ime_event(
-    state: &mut EmskinState,
-    ime: winit_crate::event::Ime,
-    window: &winit_crate::window::Window,
-) {
-    use smithay::wayland::text_input::TextInputSeat;
-    use winit_crate::event::Ime;
-
-    let ti = state.seat.text_input();
-
-    // Sync cursor area so the host IME popup appears near the text cursor.
-    // cursor_rectangle is surface-local; add the app's compositor position.
-    if let Some(rect) = ti.cursor_rectangle() {
-        let app_loc = ti
-            .focus()
-            .and_then(|s| state.apps.id_for_surface(&s))
-            .and_then(|id| state.apps.get(id))
-            .and_then(|app| app.geometry)
-            .map(|g| g.loc)
-            .unwrap_or_default();
-        window.set_ime_cursor_area(
-            winit_crate::dpi::LogicalPosition::new(
-                (rect.loc.x + app_loc.x) as f64,
-                (rect.loc.y + app_loc.y) as f64,
-            ),
-            winit_crate::dpi::LogicalSize::new(rect.size.w as f64, rect.size.h as f64),
-        );
-    }
-
-    match ime {
-        Ime::Preedit(text, cursor) => {
-            let (begin, end) = cursor
-                .map(|(b, e)| (b as i32, e as i32))
-                .unwrap_or((-1, -1));
-            ti.with_focused_text_input(|t, _| {
-                t.preedit_string(Some(text.clone()), begin, end);
-            });
-            ti.done(false);
-        }
-        Ime::Commit(text) => {
-            ti.with_focused_text_input(|t, _| {
-                t.preedit_string(None, 0, 0);
-                t.commit_string(Some(text.clone()));
-            });
-            ti.done(false);
-        }
-        Ime::Disabled => {
-            ti.with_focused_text_input(|t, _| {
-                t.preedit_string(None, 0, 0);
-            });
-            ti.done(false);
-            ti.leave();
-        }
-        Ime::Enabled => {
-            ti.enter();
-        }
-    }
 }

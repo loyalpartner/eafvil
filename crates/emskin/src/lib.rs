@@ -3,6 +3,7 @@ pub mod capture;
 pub mod clipboard_bridge;
 pub mod focus;
 pub mod handlers;
+pub mod ime;
 pub mod input;
 pub mod ipc;
 pub mod mirror_render;
