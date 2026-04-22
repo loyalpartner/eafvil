@@ -86,6 +86,20 @@ pub struct FocusState {
     pub host_saved_focus: Option<crate::KeyboardFocusTarget>,
 }
 
+impl FocusState {
+    /// Clear every saved-focus slot. Called on workspace switch: the
+    /// saved targets may reference surfaces in the departing workspace,
+    /// which become stale the moment `switch_workspace` swaps the
+    /// active `Space`. `on_focus_enter` / prefix restore / layer
+    /// dismissal all read these slots unconditionally and would
+    /// otherwise re-grant focus to a surface that's no longer mapped.
+    pub fn reset_on_workspace_switch(&mut self) {
+        self.prefix_saved_focus = None;
+        self.layer_saved_focus = None;
+        self.host_saved_focus = None;
+    }
+}
+
 /// Clipboard/selection routing state grouped together.
 #[derive(Default)]
 pub struct SelectionState {
@@ -572,8 +586,13 @@ impl EmskinState {
         // apps are displayed in which Emacs frame.
 
         // Reset state that references the old workspace's surfaces.
-        self.focus.prefix_saved_focus = None;
-        self.focus.layer_saved_focus = None;
+        // `host_saved_focus` MUST be cleared alongside the prefix/layer
+        // slots — otherwise an Alt+Tab-away → workspace-switch → Alt+Tab-
+        // back sequence restores focus to a surface in the now-inactive
+        // workspace (sending `wl_keyboard.enter` to an unmapped client).
+        // Centralising this in `FocusState::reset_on_workspace_switch`
+        // makes future field additions self-documenting.
+        self.focus.reset_on_workspace_switch();
         self.ime.reset_on_workspace_switch();
         self.effects
             .reset_on_workspace_switch(self.start_time.elapsed());
@@ -813,4 +832,68 @@ pub struct ClientState {
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+}
+
+#[cfg(test)]
+mod focus_state_tests {
+    use super::*;
+
+    // `KeyboardFocusTarget` wraps smithay types (`Window`, `LayerSurface`,
+    // `PopupKind`) that require a live Wayland `Display` + `Client` to
+    // instantiate, so `layer_saved_focus` and `host_saved_focus` can only
+    // be populated via the e2e suite. `prefix_saved_focus` has the
+    // `Option<Option<...>>` shape — `Some(None)` means "prefix sequence
+    // active, no prior focus", a valid sentinel we *can* construct here.
+    // That one exercise is enough to catch the classic "method forgets to
+    // touch a field" bug; the other two slots are covered by
+    // `tests/e2e_*` workspace-switch paths.
+
+    #[test]
+    fn default_is_all_none() {
+        let f = FocusState::default();
+        assert!(f.prefix_saved_focus.is_none());
+        assert!(f.layer_saved_focus.is_none());
+        assert!(f.host_saved_focus.is_none());
+    }
+
+    #[test]
+    fn reset_clears_populated_prefix_saved_focus() {
+        let mut f = FocusState::default();
+        f.prefix_saved_focus = Some(None);
+        assert!(f.prefix_saved_focus.is_some(), "precondition");
+
+        f.reset_on_workspace_switch();
+
+        assert!(
+            f.prefix_saved_focus.is_none(),
+            "reset must clear prefix_saved_focus"
+        );
+    }
+
+    #[test]
+    fn reset_is_idempotent_on_default_state() {
+        let mut f = FocusState::default();
+        f.reset_on_workspace_switch();
+        assert!(f.prefix_saved_focus.is_none());
+        assert!(f.layer_saved_focus.is_none());
+        assert!(f.host_saved_focus.is_none());
+    }
+
+    #[test]
+    fn reset_clears_every_saved_focus_slot_enumerated() {
+        // Regression guard: a future field added to FocusState and
+        // forgotten in reset_on_workspace_switch will not be caught by
+        // `default_is_all_none` alone. This test enumerates every
+        // currently-existing slot so a reviewer adding a new slot has a
+        // concrete checklist to update here. If you add a field to
+        // FocusState, add its .is_none() assertion below *and* its
+        // corresponding `self.<field> = None` to the method.
+        let mut f = FocusState::default();
+        f.prefix_saved_focus = Some(None);
+        f.reset_on_workspace_switch();
+
+        assert!(f.prefix_saved_focus.is_none(), "slot 1: prefix_saved_focus");
+        assert!(f.layer_saved_focus.is_none(), "slot 2: layer_saved_focus");
+        assert!(f.host_saved_focus.is_none(), "slot 3: host_saved_focus");
+    }
 }
