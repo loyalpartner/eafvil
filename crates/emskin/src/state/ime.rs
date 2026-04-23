@@ -1,12 +1,50 @@
-//! IME (input method) bridge between the host compositor and embedded
-//! Wayland clients via `text_input_v3`.
+//! IME (input method) bridge — unified state store for both the
+//! text_input_v3 path (Wayland-native clients) and the DBus fcitx5
+//! frontend path (`GTK_IM_MODULE=fcitx` clients).
 //!
-//! Three smithay-imposed constraints drive the design — see
-//! `crates/emskin/CLAUDE.md` → IME for the full "why":
+//! # Design
 //!
-//! - `set_ime_allowed` must be toggled per-focused-client (registering `TextInputManagerState` makes fcitx5-gtk abandon its DBus path for text_input_v3, so enabling host IME for a GTK/Qt client that handles its own IM breaks input).
-//! - `text_input.enter()/leave()` must be called by hand from `focus_changed` (smithay gates them on `input_method.has_instance()` and emskin implements no input_method protocol).
-//! - The `set_ime_allowed` decision is deferred via `ime_enabled` + [`ImeBridge::take_ime_enabled`] (`focus_changed` has no access to the winit backend).
+//! Three smithay-imposed constraints from the text_input_v3 side:
+//!
+//! - `set_ime_allowed` must be toggled per-focused-client (registering
+//!   `TextInputManagerState` makes fcitx5-gtk abandon its DBus path for
+//!   text_input_v3, so enabling host IME for a GTK/Qt client that
+//!   handles its own IM breaks input).
+//! - `text_input.enter()/leave()` must be called by hand from
+//!   `focus_changed` (smithay gates them on `input_method.has_instance()`
+//!   and emskin implements no input_method protocol).
+//! - `focus_changed` cannot access the winit backend, so any winit
+//!   side-effect has to be deferred to the render loop.
+//!
+//! The bridge stores **state**, not **events**. Specifically:
+//!
+//! ```text
+//! desired winit state  =  f(active_fcitx_ic, tip_wants_ime)
+//! ```
+//!
+//! Every render frame, [`ImeBridge::sync_to_winit`] recomputes `f` and
+//! pushes only the diff to winit. This is robust to event
+//! interleaving: e.g. when a client loses focus, its `ActiveFcitxIc`
+//! is dropped, which naturally means "no cursor area" without an
+//! explicit clear — the next `sync_to_winit` observes the state has
+//! changed and acts accordingly.
+//!
+//! The older design accumulated `pending_ime_enabled: Option<bool>` /
+//! `pending_cursor_area: Option<([i32;2], [i32;2])>` independently per
+//! event. That made it easy to leak one IC's cursor position into
+//! another's activation (the "popup appears at the previous app's
+//! offset when switching back" bug) because the pending field stayed
+//! populated across IC changes.
+//!
+//! # Two-sources-of-IME-demand gotcha
+//!
+//! `set_ime_allowed(true)` is wanted iff **either** path has demand:
+//! `tip_wants_ime || active_fcitx_ic.is_some()`. Writing this as the
+//! logical OR of two independent flags stops the DBus path's
+//! `FocusOut` from disabling IME while an alacritty window (via
+//! text_input_v3) still wants it on, which caused "alacritty
+//! Ctrl+Space can't toggle IME" when both paths fought over a single
+//! `Option<bool>` slot.
 
 use std::time::{Duration, Instant};
 
@@ -21,98 +59,61 @@ use crate::EmskinState;
 /// Debounce window for `CursorRect` events following a `FocusIn`.
 ///
 /// pgtk Emacs's GTK IM module fires a burst of `SetCursorRectV2`
-/// messages on FocusIn, and at least one of them carries a
-/// nonsense position like `[0, 700, 0, 20]` before the real caret
-/// coord arrives ~280ms later. Taking the last-one-wins in a tick
-/// made the candidate popup flicker to the bottom of the window
-/// on every focus change — visible as "飘" when the user switches
-/// away and comes back.
-///
-/// 100ms is long enough to cover the burst (in our logs it was
-/// all within ~10ms of FocusIn but the corrective value came back
-/// ~300ms later, meaning the bad values linger visibly), and short
-/// enough not to notice in normal typing (keystroke intervals are
-/// typically > 150ms).
+/// messages on FocusIn, some of which carry stale / nonsense
+/// positions before the real caret coord arrives ~280ms later. We
+/// accept the *first* CursorRect in the burst (which agrees with
+/// FocusIn's rect, if any — both describe the same caret moment) and
+/// debounce the rest until the settle window closes; that stops the
+/// tail-of-burst garbage from being the last value winit sees.
 const FOCUS_IN_CURSOR_RECT_SETTLE: Duration = Duration::from_millis(300);
 
 /// `(-1, -1)` sentinel per text_input_v3 for "no cursor position".
 const NO_CURSOR: (i32, i32) = (-1, -1);
 
-/// Identifier for an fcitx5 input context the broker has allocated,
-/// plus the client's emskin-space origin captured at `FocusIn` time.
-///
-/// Pinning the origin here (instead of re-reading it per event from
-/// `keyboard.current_focus()`) avoids two race bugs:
-///
-/// 1. `CursorRect` events that arrive in the same tick as a focus
-///    switch would otherwise pick up the *new* focus's origin, not
-///    the IC that actually sent them. That made Emacs's popup "drift"
-///    after switching windows and back — the CursorRect events from
-///    Emacs's IC were being translated with WeChat's (or whatever)
-///    origin.
-/// 2. Multiple DBus clients' events in one tick all used to share
-///    the single origin computed at drain time.
-///
-/// Origin is refreshed on the next `FocusIn` (a FocusOut+FocusIn
-/// cycle re-captures the latest position), so drag-during-typing on
-/// a single IC is the only remaining stale case — acceptable.
+/// State of the fcitx5 input context currently driving the DBus IME
+/// path. Present iff we've seen a `FocusIn` that hasn't been matched
+/// by a `FocusOut` / `DestroyIC` / workspace switch reset.
 #[derive(Debug, Clone)]
 pub struct ActiveFcitxIc {
     pub conn: crate::dbus_broker::ConnId,
     pub ic_path: String,
+    /// Emskin-space origin of the app that owns this IC. Captured
+    /// once at `FocusIn` and preserved across events — even if
+    /// emskin's keyboard focus later drifts to another surface, the
+    /// IC's own CursorRect events still translate against the
+    /// original origin.
     pub origin: [i32; 2],
-    /// When `FocusIn` staged this IC. Used to suppress the burst of
-    /// `CursorRect` events GTK IM fires immediately after focusing —
-    /// see [`FOCUS_IN_CURSOR_RECT_SETTLE`].
+    /// Last client-reported caret rect in **client-surface-local**
+    /// coordinates. `None` until the first `CursorRect` event (or the
+    /// `rect` field of `FocusIn`) arrives.
+    pub current_rect: Option<[i32; 4]>,
+    /// When `FocusIn` staged this IC. Used by the CursorRect debounce
+    /// — see [`FOCUS_IN_CURSOR_RECT_SETTLE`].
     pub activated_at: Instant,
+    /// `true` once we've accepted at least one `CursorRect` for this
+    /// IC. Lets the *first* CursorRect bypass the debounce window
+    /// (needed when `FocusIn.rect` was `None`) while later ones in
+    /// the same burst still get dropped.
+    pub cursor_rect_received: bool,
 }
-
-impl PartialEq for ActiveFcitxIc {
-    fn eq(&self, other: &Self) -> bool {
-        // `activated_at` is an Instant — excluded from equality so
-        // test fixtures comparing paired (conn, ic_path) via `==`
-        // don't have to construct matching timestamps.
-        self.conn == other.conn && self.ic_path == other.ic_path && self.origin == other.origin
-    }
-}
-
-impl Eq for ActiveFcitxIc {}
 
 pub struct ImeBridge {
+    /// Currently keyboard-focused Wayland surface, from smithay's
+    /// seat. Used by [`Self::on_focus_changed`] to decide text_input
+    /// enter/leave semantics.
     focused_surface: Option<WlSurface>,
-    /// True iff the currently focused surface has `zwp_text_input_v3`
-    /// bound (Chrome with `--enable-wayland-ime`, alacritty, …).
-    /// Written by [`Self::on_focus_changed`].
+    /// True iff `focused_surface` has `zwp_text_input_v3` bound.
     tip_wants_ime: bool,
-    /// True iff a fcitx5 DBus IC is currently focused (the broker saw
-    /// `InputContext1.FocusIn` and no matching `FocusOut` yet).
-    /// Written by [`Self::on_fcitx_event`].
-    dbus_wants_ime: bool,
-    /// Staged `set_ime_allowed` decision for the render loop. `None`
-    /// when the combined (`tip || dbus`) state hasn't changed since
-    /// last drain. Before M3 this was a single `Option<bool>` written
-    /// by both paths — the two writers raced and whichever wrote last
-    /// clobbered the other, so e.g. the DBus path's `Some(false)` on
-    /// FocusOut would disable IME even though text_input_v3 still
-    /// wanted it on for alacritty.
-    pending_ime_enabled: Option<bool>,
-    /// Last combined state we staged, used to decide whether to
-    /// re-stage. The `pending_ime_enabled` gets taken every render
-    /// frame, so without this we'd thrash — re-staging the same value
-    /// every event.
-    last_staged_ime_enabled: bool,
-    /// Fcitx5 IC currently focused (via broker-observed `FocusIn`).
-    /// When winit emits an IME event (`Preedit` / `Commit`) we look up
-    /// this IC to decide which DBus client to forward the result to.
-    /// At most one IC is active at a time — `FocusIn` on a new IC
-    /// evicts the previous one.
+    /// DBus fcitx5 frontend state. `None` = no IC active.
     active_fcitx_ic: Option<ActiveFcitxIc>,
-    /// Cursor area waiting for the render loop to call
-    /// `window.set_ime_cursor_area`. Drained by
-    /// [`ImeBridge::take_pending_cursor_area`]. Coords are
-    /// **emskin-winit-local** (`active.origin + client_rect`) so
-    /// the render loop can hand them straight to winit.
-    pending_cursor_area: Option<([i32; 2], [i32; 2])>,
+
+    /// What we last told winit via `set_ime_allowed`. Used to diff
+    /// against the current desired state and only emit the call when
+    /// it actually changed.
+    last_applied_ime_allowed: bool,
+    /// What we last told winit via `set_ime_cursor_area`. Same
+    /// diffing purpose.
+    last_applied_cursor_area: Option<([i32; 2], [i32; 2])>,
 }
 
 impl ImeBridge {
@@ -124,28 +125,9 @@ impl ImeBridge {
         Self {
             focused_surface: None,
             tip_wants_ime: false,
-            dbus_wants_ime: false,
-            pending_ime_enabled: None,
-            last_staged_ime_enabled: false,
             active_fcitx_ic: None,
-            pending_cursor_area: None,
-        }
-    }
-
-    /// Recompute the combined IME-enabled decision from the two
-    /// independent sources. Stages a pending value only when the
-    /// combined `tip || dbus` state actually changed — prevents
-    /// thrashing winit with redundant `set_ime_allowed` calls.
-    fn refresh_ime_enabled(&mut self) {
-        let want = self.tip_wants_ime || self.dbus_wants_ime;
-        if want != self.last_staged_ime_enabled {
-            self.pending_ime_enabled = Some(want);
-            self.last_staged_ime_enabled = want;
-            tracing::debug!(
-                tip = self.tip_wants_ime,
-                dbus = self.dbus_wants_ime,
-                "IME: set_ime_allowed({want}) staged"
-            );
+            last_applied_ime_allowed: false,
+            last_applied_cursor_area: None,
         }
     }
 
@@ -155,25 +137,61 @@ impl ImeBridge {
         self.active_fcitx_ic.as_ref()
     }
 
-    /// Drain the pending `set_ime_cursor_area` call. Called by the
-    /// winit render loop where the backend is accessible. `(position,
-    /// size)` in emskin-winit-local coords (`i32` × 2 + `i32` × 2).
-    pub fn take_pending_cursor_area(&mut self) -> Option<([i32; 2], [i32; 2])> {
-        self.pending_cursor_area.take()
+    /// Desired `set_ime_allowed` state: logical OR of the two
+    /// independent sources. See the module-level doc for why this
+    /// isn't a single shared flag.
+    fn desired_ime_allowed(&self) -> bool {
+        self.tip_wants_ime || self.active_fcitx_ic.is_some()
     }
 
-    /// Process a [`crate::dbus_broker::FcitxEvent`] observed by the
-    /// broker. Updates `active_fcitx_ic` + pins its origin, stages a
-    /// `set_ime_cursor_area` and `set_ime_allowed` change for the
-    /// winit render loop to apply.
+    /// Desired `set_ime_cursor_area` value in emskin-winit-local
+    /// coords, or `None` when no IC has reported a valid position
+    /// yet. Derived purely from `active_fcitx_ic` — nothing else
+    /// contributes, so a FocusOut (which drops `active_fcitx_ic`)
+    /// automatically "unsets" the cursor area for the next sync.
+    fn desired_cursor_area(&self) -> Option<([i32; 2], [i32; 2])> {
+        let active = self.active_fcitx_ic.as_ref()?;
+        let rect = active.current_rect?;
+        let pos = [active.origin[0] + rect[0], active.origin[1] + rect[1]];
+        let size = [rect[2].max(1), rect[3].max(1)];
+        Some((pos, size))
+    }
+
+    /// Sync the bridge's current state to winit. Called by the render
+    /// loop's `apply_pending_state` every frame.
     ///
-    /// `app_origin` is the emskin-space origin of whichever app is
-    /// focused at the tick this event was drained — used only for
-    /// `FocusChanged { focused: true }` events, where it's snapshot
-    /// onto the `ActiveFcitxIc` so subsequent `CursorRect` events on
-    /// this IC translate against the *right* origin even if the user
-    /// switches to a different app (whose DBus events land in the
-    /// same tick).
+    /// Order matters: **cursor area is set before IME allowed**. That
+    /// way when we're activating IME for a newly focused client,
+    /// winit has the fresh position staged before it tells the host
+    /// compositor "IME on" — otherwise the host IME momentarily sees
+    /// the previous client's cached position and the popup flashes
+    /// at the wrong spot.
+    pub fn sync_to_winit(&mut self, window: &winit_crate::window::Window) {
+        if let Some((pos, size)) = self.desired_cursor_area() {
+            if self.last_applied_cursor_area != Some((pos, size)) {
+                window.set_ime_cursor_area(
+                    winit_crate::dpi::LogicalPosition::new(pos[0] as f64, pos[1] as f64),
+                    winit_crate::dpi::LogicalSize::new(size[0] as f64, size[1] as f64),
+                );
+                tracing::info!(
+                    "winit.set_ime_cursor_area({}, {}, {}, {})",
+                    pos[0], pos[1], size[0], size[1]
+                );
+                self.last_applied_cursor_area = Some((pos, size));
+            }
+        }
+
+        let want_allowed = self.desired_ime_allowed();
+        if want_allowed != self.last_applied_ime_allowed {
+            window.set_ime_allowed(want_allowed);
+            tracing::info!("winit.set_ime_allowed({want_allowed})");
+            self.last_applied_ime_allowed = want_allowed;
+        }
+    }
+
+    /// Process a [`crate::dbus_broker::FcitxEvent`]. Pure state
+    /// mutation — the winit-facing side-effects happen on the next
+    /// [`Self::sync_to_winit`] call.
     pub fn on_fcitx_event(
         &mut self,
         event: crate::dbus_broker::FcitxEvent,
@@ -200,16 +218,10 @@ impl ImeBridge {
                     conn,
                     ic_path,
                     origin,
+                    current_rect: rect,
                     activated_at: Instant::now(),
+                    cursor_rect_received: rect.is_some(),
                 });
-                self.dbus_wants_ime = true;
-                self.refresh_ime_enabled();
-                if let Some(r) = rect {
-                    self.pending_cursor_area = Some((
-                        [origin[0] + r[0], origin[1] + r[1]],
-                        [r[2].max(1), r[3].max(1)],
-                    ));
-                }
             }
             FcitxEvent::FocusChanged {
                 conn,
@@ -217,9 +229,9 @@ impl ImeBridge {
                 focused: false,
                 ..
             } => {
-                // Only clear if the unfocused IC is the active one.
-                // Spurious FocusOut on a stale IC mustn't kick out the
-                // currently-active client.
+                // Only clear if the unfocused IC is the active one —
+                // spurious FocusOut on a stale IC mustn't kick out
+                // the currently-active client.
                 if self
                     .active_fcitx_ic
                     .as_ref()
@@ -227,8 +239,6 @@ impl ImeBridge {
                 {
                     tracing::debug!(?conn, ?ic_path, "fcitx IC FocusOut → deactivating winit IME");
                     self.active_fcitx_ic = None;
-                    self.dbus_wants_ime = false;
-                    self.refresh_ime_enabled();
                 }
             }
             FcitxEvent::CursorRect {
@@ -236,7 +246,7 @@ impl ImeBridge {
                 ic_path,
                 rect,
             } => {
-                let Some(active) = self.active_fcitx_ic.as_ref() else {
+                let Some(active) = self.active_fcitx_ic.as_mut() else {
                     tracing::debug!(?conn, ?ic_path, "CursorRect ignored: no active IC");
                     return;
                 };
@@ -250,33 +260,33 @@ impl ImeBridge {
                     );
                     return;
                 }
-                // Debounce the initial burst of CursorRect events
-                // GTK IM fires on FocusIn — see FOCUS_IN_CURSOR_RECT_SETTLE.
+                // Always accept the first CursorRect after FocusIn —
+                // that's how we pick up the real caret position when
+                // FocusIn.rect was None. Subsequent CursorRects
+                // within the settle window get dropped (GTK IM's
+                // post-FocusIn burst contains stale / nonsense values
+                // that would otherwise become last-write-wins).
                 let since_focus = active.activated_at.elapsed();
-                if since_focus < FOCUS_IN_CURSOR_RECT_SETTLE {
+                let in_settle = since_focus < FOCUS_IN_CURSOR_RECT_SETTLE;
+                if active.cursor_rect_received && in_settle {
                     tracing::debug!(
                         ?conn,
                         ?ic_path,
                         client_rect = ?rect,
                         since_focus_ms = since_focus.as_millis(),
-                        "CursorRect ignored: within FocusIn settle window"
+                        "CursorRect debounced: within FocusIn settle window"
                     );
                     return;
                 }
-                // Use the origin captured at FocusIn — NOT the current
-                // keyboard focus's origin. See the `ActiveFcitxIc` doc.
-                let pos = [active.origin[0] + rect[0], active.origin[1] + rect[1]];
-                let size = [rect[2].max(1), rect[3].max(1)];
                 tracing::info!(
                     ?conn,
                     ?ic_path,
                     client_rect = ?rect,
                     origin = ?active.origin,
-                    ?pos,
-                    ?size,
-                    "fcitx IC CursorRect → staging winit set_ime_cursor_area"
+                    "fcitx IC CursorRect → updating IC state"
                 );
-                self.pending_cursor_area = Some((pos, size));
+                active.current_rect = Some(rect);
+                active.cursor_rect_received = true;
             }
             FcitxEvent::IcDestroyed { conn, ic_path } => {
                 if self
@@ -285,19 +295,18 @@ impl ImeBridge {
                     .is_some_and(|a| a.conn == conn && a.ic_path == ic_path)
                 {
                     self.active_fcitx_ic = None;
-                    self.dbus_wants_ime = false;
-                    self.refresh_ime_enabled();
                 }
             }
         }
     }
 
-    /// Bridge text_input enter/leave on keyboard focus change and decide
-    /// whether host IME should be enabled for the new focus.
+    /// Bridge text_input enter/leave on keyboard focus change and
+    /// update the `tip_wants_ime` flag that feeds into
+    /// `desired_ime_allowed`.
     ///
     /// `new_focus` is the focused surface projected from
-    /// `KeyboardFocusTarget` via `WaylandFocus::wl_surface()` — X clients
-    /// surface here too once associated by xwayland-satellite.
+    /// `KeyboardFocusTarget` via `WaylandFocus::wl_surface()` — X
+    /// clients surface here too once associated by xwayland-satellite.
     pub fn on_focus_changed(&mut self, seat: &Seat<EmskinState>, new_focus: Option<WlSurface>) {
         let ti = seat.text_input();
         let old = self.focused_surface.take();
@@ -309,11 +318,11 @@ impl ImeBridge {
         );
         self.focused_surface = new_focus;
         self.tip_wants_ime = has_tip;
-        self.refresh_ime_enabled();
     }
 
-    /// Forward a host IME event to the focused text_input_v3 client and
-    /// reposition the host IME popup to follow the client's caret.
+    /// Forward a host IME event to the focused text_input_v3 client
+    /// (Wayland-native path). DBus-fcitx5 side is handled by the
+    /// broker's `emit_commit_string` / `emit_preedit`.
     pub fn on_host_ime_event(
         &mut self,
         event: winit_crate::event::Ime,
@@ -363,33 +372,16 @@ impl ImeBridge {
         }
     }
 
-    /// Drain the deferred `set_ime_allowed` decision, if any. Called
-    /// from the winit render loop where the backend is accessible.
-    pub fn take_ime_enabled(&mut self) -> Option<bool> {
-        let taken = self.pending_ime_enabled.take();
-        if let Some(enabled) = taken {
-            tracing::debug!("IME: applying set_ime_allowed({enabled})");
-        }
-        taken
-    }
-
     /// Clear state on workspace switch — stale surface refs would
-    /// otherwise route text_input events to the wrong client. The
-    /// `Some(false)` pending decision also disables host IME during the
-    /// switch transient; the next `on_focus_changed` will re-enable it
-    /// if the incoming focus has text_input_v3 bound.
+    /// otherwise route text_input events to the wrong client.
     pub fn reset_on_workspace_switch(&mut self) {
         tracing::debug!("IME: reset on workspace switch");
         self.focused_surface = None;
         self.tip_wants_ime = false;
-        self.dbus_wants_ime = false;
         self.active_fcitx_ic = None;
-        self.pending_cursor_area = None;
-        // Force re-stage of `false` even if last_staged was already
-        // false — workspace-switch expects an explicit IME off on the
-        // winit side.
-        self.pending_ime_enabled = Some(false);
-        self.last_staged_ime_enabled = false;
+        // Don't reset `last_applied_*` — next `sync_to_winit` diffs
+        // against actual state and will push whatever the new
+        // workspace demands.
     }
 }
 
@@ -426,7 +418,9 @@ fn focused_client_has_text_input(ti: &TextInputHandle) -> bool {
     found
 }
 
-/// Position the host IME popup on the embedded client's caret.
+/// Position the host IME popup on the embedded client's caret — the
+/// text_input_v3 path. The DBus path goes through
+/// `ImeBridge::sync_to_winit` instead.
 fn sync_ime_cursor_area(
     ti: &TextInputHandle,
     apps: &AppManager,
@@ -435,8 +429,6 @@ fn sync_ime_cursor_area(
     let Some(rect) = ti.cursor_rectangle() else {
         return;
     };
-    // cursor_rectangle is surface-local; offset by the embedded app's
-    // compositor-space origin so the popup lands on-screen.
     let app_loc = ti
         .focus()
         .and_then(|surface| apps.surface_geometry(&surface))
@@ -450,5 +442,16 @@ fn sync_ime_cursor_area(
         winit_crate::dpi::LogicalSize::new(rect.size.w as f64, rect.size.h as f64),
     );
 }
+
+// Allow `ActiveFcitxIc` equality in tests to ignore runtime-transient
+// fields. Used by a handful of consumers that want to assert "same
+// IC identity" without constructing matching Instants.
+impl PartialEq for ActiveFcitxIc {
+    fn eq(&self, other: &Self) -> bool {
+        self.conn == other.conn && self.ic_path == other.ic_path && self.origin == other.origin
+    }
+}
+
+impl Eq for ActiveFcitxIc {}
 
 smithay::delegate_text_input_manager!(EmskinState);

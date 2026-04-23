@@ -57,20 +57,12 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         backend.window().set_maximized(maximize);
     }
 
-    if let Some(enabled) = state.ime.take_ime_enabled() {
-        backend.window().set_ime_allowed(enabled);
-    }
-
-    if let Some((pos, size)) = state.ime.take_pending_cursor_area() {
-        backend.window().set_ime_cursor_area(
-            winit_crate::dpi::LogicalPosition::new(pos[0] as f64, pos[1] as f64),
-            winit_crate::dpi::LogicalSize::new(size[0] as f64, size[1] as f64),
-        );
-        tracing::info!(
-            "winit.set_ime_cursor_area({}, {}, {}, {})",
-            pos[0], pos[1], size[0], size[1]
-        );
-    }
+    // Sync the IME bridge's current state to winit. Computes
+    // desired (cursor_area, ime_allowed) from `active_fcitx_ic` +
+    // `tip_wants_ime` and diffs against what it last told winit —
+    // see `ImeBridge::sync_to_winit` for the ordering-matters
+    // reasoning.
+    state.ime.sync_to_winit(backend.window());
 
     if let Some(status) = state.cursor.take_changed() {
         let window = backend.window();
