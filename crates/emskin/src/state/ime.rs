@@ -155,10 +155,11 @@ impl ImeBridge {
                 rect,
             } => {
                 let origin = app_origin.unwrap_or([0, 0]);
-                tracing::debug!(
+                tracing::info!(
                     ?conn,
                     ?ic_path,
                     ?origin,
+                    ?rect,
                     "fcitx IC FocusIn → activating winit IME"
                 );
                 self.active_fcitx_ic = Some(ActiveFcitxIc {
@@ -205,11 +206,33 @@ impl ImeBridge {
                         // Use the origin captured at FocusIn — NOT the
                         // current keyboard focus's origin. See the
                         // `ActiveFcitxIc` doc comment for why.
-                        self.pending_cursor_area = Some((
-                            [active.origin[0] + rect[0], active.origin[1] + rect[1]],
-                            [rect[2].max(1), rect[3].max(1)],
-                        ));
+                        let pos = [active.origin[0] + rect[0], active.origin[1] + rect[1]];
+                        let size = [rect[2].max(1), rect[3].max(1)];
+                        tracing::info!(
+                            ?conn,
+                            ?ic_path,
+                            client_rect = ?rect,
+                            origin = ?active.origin,
+                            ?pos,
+                            ?size,
+                            "fcitx IC CursorRect → staging winit set_ime_cursor_area"
+                        );
+                        self.pending_cursor_area = Some((pos, size));
+                    } else {
+                        tracing::debug!(
+                            ?conn,
+                            ?ic_path,
+                            active_conn = ?active.conn,
+                            active_ic = active.ic_path,
+                            "CursorRect ignored: not the active IC"
+                        );
                     }
+                } else {
+                    tracing::debug!(
+                        ?conn,
+                        ?ic_path,
+                        "CursorRect ignored: no active IC"
+                    );
                 }
             }
             FcitxEvent::IcDestroyed { conn, ic_path } => {

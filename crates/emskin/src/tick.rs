@@ -112,6 +112,12 @@ pub fn event_loop_tick(state: &mut EmskinState) {
 /// bridge. Each event is translated relative to the currently focused
 /// embedded app's emskin-space origin so the cursor rect reaches
 /// winit in emskin-winit-local coordinates.
+///
+/// Marks `needs_redraw` so the staged `pending_cursor_area` /
+/// `pending_ime_enabled` reach winit within the next render frame
+/// — without this, apply-on-redraw can lag one keystroke behind the
+/// caret if the render loop is idle between input events, and the
+/// candidate popup visibly drifts.
 fn drain_fcitx_events(state: &mut EmskinState) {
     let Some(broker) = state.dbus.broker.as_mut() else {
         return;
@@ -120,6 +126,7 @@ fn drain_fcitx_events(state: &mut EmskinState) {
     if events.is_empty() {
         return;
     }
+    state.needs_redraw = true;
     let origin = focused_app_origin(state);
     for event in events {
         state.ime.on_fcitx_event(event, origin);

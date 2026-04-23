@@ -66,12 +66,9 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
             winit_crate::dpi::LogicalPosition::new(pos[0] as f64, pos[1] as f64),
             winit_crate::dpi::LogicalSize::new(size[0] as f64, size[1] as f64),
         );
-        tracing::debug!(
-            "winit IME cursor area updated pos=({}, {}) size=({}, {})",
-            pos[0],
-            pos[1],
-            size[0],
-            size[1]
+        tracing::info!(
+            "winit.set_ime_cursor_area({}, {}, {}, {})",
+            pos[0], pos[1], size[0], size[1]
         );
     }
 
