@@ -145,10 +145,15 @@ fn focused_app_rect(state: &EmskinState) -> Option<[i32; 4]> {
         _ => return None,
     };
     let surface = window.wl_surface()?;
-    // Emacs is the host — IME for Emacs itself is handled via text_input_v3
-    // in emskin directly, not via the DBus IM path we're rewriting.
+    // Emacs as main surface: its wl_surface IS the emskin winit window,
+    // so any caret coordinate Emacs reports via DBus fcitx5 is already
+    // in emskin-winit-local space. Origin is just (0, 0). This used to
+    // early-return `None` back when the IME plan was "Emacs uses
+    // text_input_v3 directly, not DBus" — B1 (interception in the
+    // broker) changed that; Emacs's DBus fcitx5 calls now flow through
+    // us like any other client's.
     if state.emacs.is_main_surface(&surface) {
-        return None;
+        return Some([0, 0, 0, 0]);
     }
     // Visible top-left of the window's buffer in space coords. DBus clients
     // report caret coordinates relative to the buffer origin (wl_surface
