@@ -35,6 +35,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 use emskin_dbus::broker::{apply_cursor_rewrites, state::ConnectionState};
+use emskin_dbus::fcitx::{self, FcitxMethod, IcRegistry};
 
 /// Newtype for per-connection id. Generated sequentially by the broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,15 +62,54 @@ pub enum PumpOutcome {
     PeerClosed,
 }
 
+/// Side-channel events emitted by the broker when it observes
+/// fcitx5 state changes on one of its intercepted connections.
+/// Drained by `emskin`'s tick loop via
+/// [`DbusBroker::drain_events`].
+///
+/// These are *not* DBus messages — they're a typed view onto the
+/// state changes the broker saw so emskin can drive winit IME
+/// without re-parsing DBus bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FcitxEvent {
+    /// Client's IC called `FocusIn` (`focused=true`) or `FocusOut`
+    /// (`focused=false`). `rect` is the IC's last-known cursor
+    /// rectangle (client-local) — present on `FocusIn` if the client
+    /// set one before, otherwise `None`.
+    FocusChanged {
+        conn: ConnId,
+        ic_path: String,
+        focused: bool,
+        rect: Option<[i32; 4]>,
+    },
+    /// Client's IC reported a new cursor rectangle (in its own
+    /// surface-local coords). `[x, y, w, h]`.
+    CursorRect {
+        conn: ConnId,
+        ic_path: String,
+        rect: [i32; 4],
+    },
+    /// Client destroyed an IC. Emskin should tear down any winit IME
+    /// state tied to it.
+    IcDestroyed { conn: ConnId, ic_path: String },
+}
+
 struct Connection {
     client: UnixStream,
     upstream: UnixStream,
     state: ConnectionState,
-    /// Bytes waiting to be written to `client` (came from upstream).
+    /// Bytes waiting to be written to `client` (came from upstream
+    /// or synthesized by us intercepting fcitx5 methods).
     client_out: VecDeque<u8>,
     /// Bytes waiting to be written to `upstream` (came from client,
-    /// possibly with cursor bytes rewritten in place).
+    /// minus any fcitx5 method_calls we intercepted).
     upstream_out: VecDeque<u8>,
+    /// Fcitx5 input contexts this client has registered with us.
+    ic_registry: IcRegistry,
+    /// Monotonic outgoing-serial counter for broker-synthesized
+    /// method_returns / signals on this connection. Starts at 1 (DBus
+    /// requires non-zero serials).
+    serial_counter: u32,
 }
 
 /// The in-process broker. Holds the listener, the upstream bus path for
@@ -82,6 +122,9 @@ pub struct DbusBroker {
     offset: Option<(i32, i32)>,
     connections: HashMap<ConnId, Connection>,
     next_id: u64,
+    /// Queued fcitx5-observation events (FocusChanged, CursorRect,
+    /// IcDestroyed). Drained by emskin each tick.
+    events: Vec<FcitxEvent>,
 }
 
 impl DbusBroker {
@@ -104,6 +147,7 @@ impl DbusBroker {
             offset: None,
             connections: HashMap::new(),
             next_id: 1,
+            events: Vec::new(),
         })
     }
 
@@ -168,6 +212,8 @@ impl DbusBroker {
                 state: ConnectionState::new(),
                 client_out: VecDeque::new(),
                 upstream_out: VecDeque::new(),
+                ic_registry: IcRegistry::new(),
+                serial_counter: 0,
             },
         );
 
@@ -180,13 +226,35 @@ impl DbusBroker {
     }
 
     /// Client → upstream pump. Reads all readable bytes from the client,
-    /// feeds them through the DBus state machine, applies the cursor
-    /// rewrite if an offset is set, and writes the result to the
-    /// upstream side (buffering anything the kernel refuses).
+    /// feeds them through the DBus state machine, and for each
+    /// observed message decides between three dispositions:
+    ///
+    /// 1. **Intercept** (fcitx5 method_calls) — build a synthetic
+    ///    `method_return` via `fcitx::build_reply`, enqueue to
+    ///    `client_out`, emit a typed [`FcitxEvent`] for emskin to
+    ///    consume, and **don't** forward the bytes to upstream.
+    /// 2. **Rewrite-and-forward** — for non-intercepted messages with
+    ///    a cursor-rewrite offset active, apply the offset in place.
+    ///    (Mostly legacy / defensive — once interception is on every
+    ///    SetCursorRect is Intercept'd, but we keep the codepath for
+    ///    a clean fallback if the classifier ever returns `None` for
+    ///    a message that still needs the old offset treatment.)
+    /// 3. **Forward verbatim** — every other message.
     pub fn pump_client_to_upstream(&mut self, id: ConnId) -> io::Result<PumpOutcome> {
-        let Some(conn) = self.connections.get_mut(&id) else {
+        // Split-borrow so we can touch `self.events` while `conn` is
+        // live. `offset` is `Option<(i32,i32)>` which is Copy so no
+        // borrow-gymnastics needed.
+        let Self {
+            connections,
+            events,
+            offset,
+            ..
+        } = self;
+        let Some(conn) = connections.get_mut(&id) else {
             return Ok(PumpOutcome::PeerClosed);
         };
+        let offset = *offset;
+
         let mut buf = [0u8; 8 * 1024];
         let n = match conn.client.read(&mut buf) {
             Ok(0) => return Ok(PumpOutcome::PeerClosed),
@@ -196,10 +264,30 @@ impl DbusBroker {
             Err(e) => return Err(e),
         };
 
-        let mut out = conn
+        let out = conn
             .state
             .client_feed(&buf[..n])
             .map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+
+        // Fast path: no messages (handshake bytes only). Forward
+        // verbatim — nothing to inspect or intercept.
+        if out.messages.is_empty() {
+            conn.upstream_out.extend(out.forward);
+            Self::try_flush(&mut conn.upstream, &mut conn.upstream_out)?;
+            return Ok(PumpOutcome::Active);
+        }
+
+        // Slow path: walk every message, decide its disposition.
+        let mut forwarded = Vec::with_capacity(out.forward.len());
+        // Copy the pre-message prefix (auth bytes if the BEGIN landed
+        // in this same chunk) verbatim.
+        forwarded.extend_from_slice(&out.forward[..out.messages[0].offset]);
+
+        // We may still need cursor rewrite for the non-intercepted
+        // tail — track which messages survive so `apply_cursor_rewrites`
+        // can walk them. Using a scratch `Output` keeps the existing
+        // function signature.
+        let mut kept = emskin_dbus::broker::state::Output::default();
 
         for msg in &out.messages {
             tracing::info!(
@@ -209,15 +297,115 @@ impl DbusBroker {
                 body_len = msg.header.body_len,
                 "client → bus message"
             );
+
+            let msg_bytes = &out.forward[msg.offset..msg.offset + msg.length];
+            let body_start_in_msg = msg.length - msg.header.body_len as usize;
+            let body = &msg_bytes[body_start_in_msg..];
+
+            if let Some(fm) = fcitx::classify(&msg.header, body) {
+                // Intercept.
+                let reply = fcitx::build_reply(
+                    &msg.header,
+                    &fm,
+                    &mut conn.ic_registry,
+                    &mut conn.serial_counter,
+                );
+                conn.client_out.extend(reply);
+                Self::emit_fcitx_event(events, id, &fm, &conn.ic_registry);
+                tracing::debug!(
+                    ?id,
+                    member = msg.header.member.as_deref().unwrap_or(""),
+                    "intercepted fcitx5 method_call; reply queued"
+                );
+                continue;
+            }
+
+            // Not fcitx5 — keep for upstream.
+            let offset_in_kept = forwarded.len();
+            forwarded.extend_from_slice(msg_bytes);
+            kept.messages
+                .push(emskin_dbus::broker::state::ObservedMessage {
+                    header: msg.header.clone(),
+                    offset: offset_in_kept,
+                    length: msg.length,
+                });
         }
 
-        if let Some(delta) = self.offset {
-            apply_cursor_rewrites(&mut out, delta);
+        // Legacy cursor rewrite. Once M3 lands with winit IME driving,
+        // this branch should be dead (every SetCursorRect is Intercept).
+        if let Some(delta) = offset {
+            kept.forward = forwarded;
+            apply_cursor_rewrites(&mut kept, delta);
+            forwarded = kept.forward;
         }
 
-        conn.upstream_out.extend(out.forward);
+        conn.upstream_out.extend(forwarded);
         Self::try_flush(&mut conn.upstream, &mut conn.upstream_out)?;
+        // Also flush client_out now — our intercepted replies shouldn't
+        // wait for the peer's next wakeup to reach the client.
+        Self::try_flush(&mut conn.client, &mut conn.client_out)?;
         Ok(PumpOutcome::Active)
+    }
+
+    /// Map a classified fcitx5 method_call to a [`FcitxEvent`] and
+    /// push onto the broker's event queue. Most methods emit no
+    /// event; only focus + cursor + destroy are interesting.
+    fn emit_fcitx_event(
+        events: &mut Vec<FcitxEvent>,
+        conn: ConnId,
+        method: &FcitxMethod,
+        registry: &IcRegistry,
+    ) {
+        match method {
+            FcitxMethod::FocusIn { ic_path } => {
+                let rect = registry.get(ic_path).and_then(|s| s.cursor_rect);
+                events.push(FcitxEvent::FocusChanged {
+                    conn,
+                    ic_path: ic_path.clone(),
+                    focused: true,
+                    rect,
+                });
+            }
+            FcitxMethod::FocusOut { ic_path } => {
+                events.push(FcitxEvent::FocusChanged {
+                    conn,
+                    ic_path: ic_path.clone(),
+                    focused: false,
+                    rect: None,
+                });
+            }
+            FcitxMethod::SetCursorRect {
+                ic_path, x, y, w, h,
+            }
+            | FcitxMethod::SetCursorRectV2 {
+                ic_path, x, y, w, h, ..
+            } => events.push(FcitxEvent::CursorRect {
+                conn,
+                ic_path: ic_path.clone(),
+                rect: [*x, *y, *w, *h],
+            }),
+            FcitxMethod::SetCursorLocation { ic_path, x, y } => {
+                events.push(FcitxEvent::CursorRect {
+                    conn,
+                    ic_path: ic_path.clone(),
+                    rect: [*x, *y, 0, 0],
+                })
+            }
+            FcitxMethod::DestroyIC { ic_path } => events.push(FcitxEvent::IcDestroyed {
+                conn,
+                ic_path: ic_path.clone(),
+            }),
+            // CreateInputContext / Reset / SetCapability / ProcessKeyEvent
+            // / SetSurroundingText[Position] don't change state we need
+            // emskin to react to.
+            _ => {}
+        }
+    }
+
+    /// Drain every queued fcitx5 event. Called by emskin's tick loop;
+    /// empties the internal queue.
+    pub fn drain_events(&mut self) -> Vec<FcitxEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// Upstream → client pump. Raw pass-through (phase 1 doesn't inspect
@@ -350,67 +538,168 @@ mod tests {
         assert_eq!(b.offset(), None);
     }
 
-    /// End-to-end rewrite: simulated client writes a SetCursorRect via
-    /// the listener, broker forwards to upstream with `(dx, dy)` added.
+    /// Helper: accept a client pair against a fake upstream listener.
+    /// Returns (broker, client-side stream, upstream-side stream,
+    /// conn id). Caller writes to `client`, reads from `upstream`.
+    fn setup_pair(
+        session: &Path,
+        upstream_path: PathBuf,
+        upstream_listener: &UnixListener,
+    ) -> (DbusBroker, UnixStream, UnixStream, ConnId) {
+        let mut broker = DbusBroker::bind(session, upstream_path).unwrap();
+        let client = UnixStream::connect(broker.listen_path()).unwrap();
+        client.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let accepted = broker.accept_one().unwrap().expect("accept ready");
+        let (upstream_peer, _) = upstream_listener.accept().unwrap();
+        upstream_peer.set_nonblocking(true).unwrap();
+        (broker, client, upstream_peer, accepted.id)
+    }
+
+    /// Drain all pending reads from a non-blocking stream until it
+    /// WouldBlock. Retries a few times to let the broker pump.
+    fn drain(stream: &mut UnixStream) -> Vec<u8> {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        for _ in 0..5 {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(_) => break,
+            }
+        }
+        got
+    }
+
+    /// Intercepted fcitx5 methods don't reach upstream; instead the
+    /// broker synthesizes a method_return and writes it back to the
+    /// client. Verifies the SetCursorRect path is now Intercept.
     #[test]
-    fn client_to_upstream_applies_offset() {
+    fn set_cursor_rect_is_intercepted_not_forwarded() {
         let dir = tempdir().unwrap();
         let session = dir.path().join("s");
         let upstream_path = dir.path().join("upstream.sock");
         let upstream_listener = UnixListener::bind(&upstream_path).unwrap();
         upstream_listener.set_nonblocking(true).unwrap();
+        let (mut broker, mut client, mut upstream_peer, id) =
+            setup_pair(&session, upstream_path, &upstream_listener);
 
-        let mut broker = DbusBroker::bind(&session, upstream_path).unwrap();
-        broker.set_offset(Some((50, 60)));
-
-        // Client dials the broker.
-        let mut client = UnixStream::connect(broker.listen_path()).unwrap();
-        client.set_nonblocking(true).unwrap();
-
-        // Broker accepts + dials upstream. The listener's accept() was
-        // just triggered so poll briefly.
-        thread::sleep(Duration::from_millis(20));
-        let accepted = broker.accept_one().unwrap().expect("accept ready");
-        let (upstream_peer, _) = upstream_listener.accept().unwrap();
-        upstream_peer.set_nonblocking(true).unwrap();
-
-        // Build handshake + a SetCursorRect method_call by hand.
         let handshake = b"\0AUTH EXTERNAL 30\r\nBEGIN\r\n";
         let call = build_set_cursor_rect(7, (100, 200, 10, 20));
         let mut payload = Vec::from(&handshake[..]);
         payload.extend_from_slice(&call);
         client.write_all(&payload).unwrap();
 
-        // Drain the broker's client fd a couple of times to be sure
-        // both the auth prefix and the full message pass through.
         for _ in 0..5 {
-            broker.pump_client_to_upstream(accepted.id).unwrap();
+            broker.pump_client_to_upstream(id).unwrap();
             thread::sleep(Duration::from_millis(5));
         }
 
-        // Read from upstream side.
-        let mut got = Vec::new();
-        let mut buf = [0u8; 4096];
-        for _ in 0..5 {
-            match (&upstream_peer).read(&mut buf) {
-                Ok(n) if n > 0 => got.extend_from_slice(&buf[..n]),
-                _ => thread::sleep(Duration::from_millis(5)),
+        // Upstream should only see the handshake — the SetCursorRect
+        // was intercepted.
+        let upstream_got = drain(&mut upstream_peer);
+        assert_eq!(
+            upstream_got, handshake,
+            "upstream should see only the handshake; SetCursorRect was intercepted"
+        );
+
+        // Client should receive our synthesized method_return.
+        let client_got = drain(&mut client);
+        assert!(!client_got.is_empty(), "client should have a reply");
+        let reply_hdr = emskin_dbus::dbus::message::parse_header(&client_got).unwrap();
+        assert_eq!(reply_hdr.reply_serial, Some(7));
+        assert_eq!(reply_hdr.body_len, 0); // empty body
+
+        // And a CursorRect event should be on the queue.
+        let events = broker.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            FcitxEvent::CursorRect {
+                conn: id,
+                ic_path: "/a".into(),
+                rect: [100, 200, 10, 20],
             }
+        );
+
+        broker.remove_connection(id);
+    }
+
+    /// A non-fcitx5 method_call (e.g. `Hello` to the DBus daemon)
+    /// must still flow through to upstream unchanged. Regression guard
+    /// against an over-eager interceptor.
+    #[test]
+    fn non_fcitx_method_passes_through() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("s");
+        let upstream_path = dir.path().join("upstream.sock");
+        let upstream_listener = UnixListener::bind(&upstream_path).unwrap();
+        upstream_listener.set_nonblocking(true).unwrap();
+        let (mut broker, mut client, mut upstream_peer, id) =
+            setup_pair(&session, upstream_path, &upstream_listener);
+
+        let handshake = b"\0AUTH EXTERNAL 30\r\nBEGIN\r\n";
+        let hello = build_hello(99);
+        let mut payload = Vec::from(&handshake[..]);
+        payload.extend_from_slice(&hello);
+        client.write_all(&payload).unwrap();
+
+        for _ in 0..5 {
+            broker.pump_client_to_upstream(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
         }
 
-        assert!(got.starts_with(handshake), "handshake should pass through");
-        let msg_bytes = &got[handshake.len()..];
-        let hdr = emskin_dbus::dbus::message::parse_header(msg_bytes).unwrap();
-        assert_eq!(hdr.member.as_deref(), Some("SetCursorRect"));
-        let body_start = msg_bytes.len() - hdr.body_len as usize;
-        let body = &msg_bytes[body_start..];
-        assert_eq!(i32::from_le_bytes(body[0..4].try_into().unwrap()), 150);
-        assert_eq!(i32::from_le_bytes(body[4..8].try_into().unwrap()), 260);
-        // w, h unchanged
-        assert_eq!(i32::from_le_bytes(body[8..12].try_into().unwrap()), 10);
-        assert_eq!(i32::from_le_bytes(body[12..16].try_into().unwrap()), 20);
+        let upstream_got = drain(&mut upstream_peer);
+        assert!(upstream_got.starts_with(handshake));
+        let msg_bytes = &upstream_got[handshake.len()..];
+        assert_eq!(msg_bytes, hello.as_slice(), "Hello should pass through");
+        // Client shouldn't see a reply from us; the upstream bus is
+        // responsible for answering Hello.
+        let client_got = drain(&mut client);
+        assert!(client_got.is_empty(), "broker should not reply to Hello");
+        assert!(broker.drain_events().is_empty());
 
-        broker.remove_connection(accepted.id);
+        broker.remove_connection(id);
+    }
+
+    /// CreateInputContext: the broker should allocate an IC path,
+    /// send back `(o, ay)` in the method_return, and NOT forward to
+    /// upstream (real fcitx5 never learns about this client).
+    #[test]
+    fn create_input_context_is_intercepted_with_oay_reply() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("s");
+        let upstream_path = dir.path().join("upstream.sock");
+        let upstream_listener = UnixListener::bind(&upstream_path).unwrap();
+        upstream_listener.set_nonblocking(true).unwrap();
+        let (mut broker, mut client, mut upstream_peer, id) =
+            setup_pair(&session, upstream_path, &upstream_listener);
+
+        let handshake = b"\0AUTH EXTERNAL 30\r\nBEGIN\r\n";
+        let call = build_create_input_context(42);
+        let mut payload = Vec::from(&handshake[..]);
+        payload.extend_from_slice(&call);
+        client.write_all(&payload).unwrap();
+
+        for _ in 0..5 {
+            broker.pump_client_to_upstream(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        // Upstream: handshake only.
+        let upstream_got = drain(&mut upstream_peer);
+        assert_eq!(upstream_got, handshake);
+
+        // Client: method_return with (oay) signature.
+        let client_got = drain(&mut client);
+        let hdr = emskin_dbus::dbus::message::parse_header(&client_got).unwrap();
+        assert_eq!(hdr.reply_serial, Some(42));
+        assert_eq!(hdr.signature.as_deref(), Some("(oay)"));
+
+        broker.remove_connection(id);
     }
 
     // ------- DBus message builders (copied from emskin-dbus io.rs tests) -------
@@ -442,6 +731,48 @@ mod tests {
         out.push(sig.len() as u8);
         out.extend_from_slice(sig.as_bytes());
         out.push(0);
+    }
+
+    /// A plain DBus `Hello` method_call (goes to the DBus daemon, not
+    /// fcitx5 — so it should pass through the broker unchanged).
+    fn build_hello(serial: u32) -> Vec<u8> {
+        let mut fields = Vec::new();
+        push_string_field(&mut fields, 1, "o", "/org/freedesktop/DBus");
+        push_string_field(&mut fields, 2, "s", "org.freedesktop.DBus");
+        push_string_field(&mut fields, 3, "s", "Hello");
+        push_string_field(&mut fields, 6, "s", "org.freedesktop.DBus");
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&[b'l', 1, 0, 1]);
+        msg.extend_from_slice(&0u32.to_le_bytes()); // body_len
+        msg.extend_from_slice(&serial.to_le_bytes());
+        msg.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&fields);
+        pad_to(&mut msg, 8);
+        msg
+    }
+
+    /// A `CreateInputContext` with an empty `a(ss)` body.
+    fn build_create_input_context(serial: u32) -> Vec<u8> {
+        let mut fields = Vec::new();
+        push_string_field(&mut fields, 1, "o", "/org/freedesktop/portal/inputmethod");
+        push_string_field(&mut fields, 2, "s", "org.fcitx.Fcitx.InputMethod1");
+        push_string_field(&mut fields, 3, "s", "CreateInputContext");
+        push_string_field(&mut fields, 6, "s", "org.fcitx.Fcitx5");
+        push_signature_field(&mut fields, 8, "a(ss)");
+
+        // Body: u32 array length = 0.
+        let body = 0u32.to_le_bytes();
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&[b'l', 1, 0, 1]);
+        msg.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&serial.to_le_bytes());
+        msg.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&fields);
+        pad_to(&mut msg, 8);
+        msg.extend_from_slice(&body);
+        msg
     }
 
     fn build_set_cursor_rect(serial: u32, coords: (i32, i32, i32, i32)) -> Vec<u8> {

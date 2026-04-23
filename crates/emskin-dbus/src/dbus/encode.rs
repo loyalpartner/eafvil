@@ -187,7 +187,7 @@ impl Error<'_> {
 
 /// Pad `buf` with zero bytes until its length is a multiple of `bound`.
 fn align(buf: &mut Vec<u8>, bound: usize) {
-    while buf.len() % bound != 0 {
+    while !buf.len().is_multiple_of(bound) {
         buf.push(0);
     }
 }

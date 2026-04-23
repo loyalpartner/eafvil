@@ -30,9 +30,11 @@
 
 pub mod classify;
 pub mod ic;
+pub mod reply;
 
 pub use classify::{classify, FcitxMethod};
 pub use ic::{IcRegistry, IcState};
+pub use reply::build_reply;
 
 /// Interfaces this module recognizes. Exposed so the broker can gate
 /// "did this method_call match fcitx5?" on a cheap string compare
