@@ -19,23 +19,54 @@ use crate::EmskinState;
 /// `(-1, -1)` sentinel per text_input_v3 for "no cursor position".
 const NO_CURSOR: (i32, i32) = (-1, -1);
 
-/// Identifier for an fcitx5 input context the broker has allocated.
-/// `(DbusBroker connection id, IC object path)`. Paired with
-/// [`ActiveFcitxIc::app_origin`] so the winit IME caret area stays
-/// correct across window moves.
+/// Identifier for an fcitx5 input context the broker has allocated,
+/// plus the client's emskin-space origin captured at `FocusIn` time.
+///
+/// Pinning the origin here (instead of re-reading it per event from
+/// `keyboard.current_focus()`) avoids two race bugs:
+///
+/// 1. `CursorRect` events that arrive in the same tick as a focus
+///    switch would otherwise pick up the *new* focus's origin, not
+///    the IC that actually sent them. That made Emacs's popup "drift"
+///    after switching windows and back — the CursorRect events from
+///    Emacs's IC were being translated with WeChat's (or whatever)
+///    origin.
+/// 2. Multiple DBus clients' events in one tick all used to share
+///    the single origin computed at drain time.
+///
+/// Origin is refreshed on the next `FocusIn` (a FocusOut+FocusIn
+/// cycle re-captures the latest position), so drag-during-typing on
+/// a single IC is the only remaining stale case — acceptable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveFcitxIc {
     pub conn: crate::dbus_broker::ConnId,
     pub ic_path: String,
+    pub origin: [i32; 2],
 }
 
 pub struct ImeBridge {
     focused_surface: Option<WlSurface>,
-    /// Host IME enabled/disabled decision waiting for the render loop
-    /// to apply via `set_ime_allowed`. Drained by `take_ime_enabled`
-    /// (write-once, read-once semantic — the `Option` distinguishes
-    /// "no change to apply" from "apply false").
-    ime_enabled: Option<bool>,
+    /// True iff the currently focused surface has `zwp_text_input_v3`
+    /// bound (Chrome with `--enable-wayland-ime`, alacritty, …).
+    /// Written by [`Self::on_focus_changed`].
+    tip_wants_ime: bool,
+    /// True iff a fcitx5 DBus IC is currently focused (the broker saw
+    /// `InputContext1.FocusIn` and no matching `FocusOut` yet).
+    /// Written by [`Self::on_fcitx_event`].
+    dbus_wants_ime: bool,
+    /// Staged `set_ime_allowed` decision for the render loop. `None`
+    /// when the combined (`tip || dbus`) state hasn't changed since
+    /// last drain. Before M3 this was a single `Option<bool>` written
+    /// by both paths — the two writers raced and whichever wrote last
+    /// clobbered the other, so e.g. the DBus path's `Some(false)` on
+    /// FocusOut would disable IME even though text_input_v3 still
+    /// wanted it on for alacritty.
+    pending_ime_enabled: Option<bool>,
+    /// Last combined state we staged, used to decide whether to
+    /// re-stage. The `pending_ime_enabled` gets taken every render
+    /// frame, so without this we'd thrash — re-staging the same value
+    /// every event.
+    last_staged_ime_enabled: bool,
     /// Fcitx5 IC currently focused (via broker-observed `FocusIn`).
     /// When winit emits an IME event (`Preedit` / `Commit`) we look up
     /// this IC to decide which DBus client to forward the result to.
@@ -45,7 +76,7 @@ pub struct ImeBridge {
     /// Cursor area waiting for the render loop to call
     /// `window.set_ime_cursor_area`. Drained by
     /// [`ImeBridge::take_pending_cursor_area`]. Coords are
-    /// **emskin-winit-local** (`focused_app_origin + client_rect`) so
+    /// **emskin-winit-local** (`active.origin + client_rect`) so
     /// the render loop can hand them straight to winit.
     pending_cursor_area: Option<([i32; 2], [i32; 2])>,
 }
@@ -58,9 +89,29 @@ impl ImeBridge {
         let _ = TextInputManagerState::new::<EmskinState>(dh);
         Self {
             focused_surface: None,
-            ime_enabled: None,
+            tip_wants_ime: false,
+            dbus_wants_ime: false,
+            pending_ime_enabled: None,
+            last_staged_ime_enabled: false,
             active_fcitx_ic: None,
             pending_cursor_area: None,
+        }
+    }
+
+    /// Recompute the combined IME-enabled decision from the two
+    /// independent sources. Stages a pending value only when the
+    /// combined `tip || dbus` state actually changed — prevents
+    /// thrashing winit with redundant `set_ime_allowed` calls.
+    fn refresh_ime_enabled(&mut self) {
+        let want = self.tip_wants_ime || self.dbus_wants_ime;
+        if want != self.last_staged_ime_enabled {
+            self.pending_ime_enabled = Some(want);
+            self.last_staged_ime_enabled = want;
+            tracing::debug!(
+                tip = self.tip_wants_ime,
+                dbus = self.dbus_wants_ime,
+                "IME: set_ime_allowed({want}) staged"
+            );
         }
     }
 
@@ -78,12 +129,17 @@ impl ImeBridge {
     }
 
     /// Process a [`crate::dbus_broker::FcitxEvent`] observed by the
-    /// broker. Updates `active_fcitx_ic`, stages an
-    /// `ime_enabled` / `pending_cursor_area` change for the winit
-    /// render loop to apply. `app_origin` is the focused embedded
-    /// app's emskin-space origin (computed elsewhere — the broker's
-    /// rects are client-surface-local, so this offset moves them into
-    /// emskin-winit-local).
+    /// broker. Updates `active_fcitx_ic` + pins its origin, stages a
+    /// `set_ime_cursor_area` and `set_ime_allowed` change for the
+    /// winit render loop to apply.
+    ///
+    /// `app_origin` is the emskin-space origin of whichever app is
+    /// focused at the tick this event was drained — used only for
+    /// `FocusChanged { focused: true }` events, where it's snapshot
+    /// onto the `ActiveFcitxIc` so subsequent `CursorRect` events on
+    /// this IC translate against the *right* origin even if the user
+    /// switches to a different app (whose DBus events land in the
+    /// same tick).
     pub fn on_fcitx_event(
         &mut self,
         event: crate::dbus_broker::FcitxEvent,
@@ -98,10 +154,21 @@ impl ImeBridge {
                 focused: true,
                 rect,
             } => {
-                tracing::debug!(?conn, ?ic_path, "fcitx IC FocusIn → activating winit IME");
-                self.active_fcitx_ic = Some(ActiveFcitxIc { conn, ic_path });
-                self.ime_enabled = Some(true);
-                if let (Some(r), Some(origin)) = (rect, app_origin) {
+                let origin = app_origin.unwrap_or([0, 0]);
+                tracing::debug!(
+                    ?conn,
+                    ?ic_path,
+                    ?origin,
+                    "fcitx IC FocusIn → activating winit IME"
+                );
+                self.active_fcitx_ic = Some(ActiveFcitxIc {
+                    conn,
+                    ic_path,
+                    origin,
+                });
+                self.dbus_wants_ime = true;
+                self.refresh_ime_enabled();
+                if let Some(r) = rect {
                     self.pending_cursor_area = Some((
                         [origin[0] + r[0], origin[1] + r[1]],
                         [r[2].max(1), r[3].max(1)],
@@ -124,7 +191,8 @@ impl ImeBridge {
                 {
                     tracing::debug!(?conn, ?ic_path, "fcitx IC FocusOut → deactivating winit IME");
                     self.active_fcitx_ic = None;
-                    self.ime_enabled = Some(false);
+                    self.dbus_wants_ime = false;
+                    self.refresh_ime_enabled();
                 }
             }
             FcitxEvent::CursorRect {
@@ -132,14 +200,13 @@ impl ImeBridge {
                 ic_path,
                 rect,
             } => {
-                if self
-                    .active_fcitx_ic
-                    .as_ref()
-                    .is_some_and(|a| a.conn == conn && a.ic_path == ic_path)
-                {
-                    if let Some(origin) = app_origin {
+                if let Some(active) = self.active_fcitx_ic.as_ref() {
+                    if active.conn == conn && active.ic_path == ic_path {
+                        // Use the origin captured at FocusIn — NOT the
+                        // current keyboard focus's origin. See the
+                        // `ActiveFcitxIc` doc comment for why.
                         self.pending_cursor_area = Some((
-                            [origin[0] + rect[0], origin[1] + rect[1]],
+                            [active.origin[0] + rect[0], active.origin[1] + rect[1]],
                             [rect[2].max(1), rect[3].max(1)],
                         ));
                     }
@@ -152,7 +219,8 @@ impl ImeBridge {
                     .is_some_and(|a| a.conn == conn && a.ic_path == ic_path)
                 {
                     self.active_fcitx_ic = None;
-                    self.ime_enabled = Some(false);
+                    self.dbus_wants_ime = false;
+                    self.refresh_ime_enabled();
                 }
             }
         }
@@ -168,13 +236,14 @@ impl ImeBridge {
         let ti = seat.text_input();
         let old = self.focused_surface.take();
         transition_focus(ti, old, &new_focus);
-        let enabled = focused_client_has_text_input(ti);
+        let has_tip = focused_client_has_text_input(ti);
         tracing::debug!(
-            "IME focus_changed: has_focus={} ime_enabled={enabled}",
+            "IME focus_changed: has_focus={} tip_wants_ime={has_tip}",
             new_focus.is_some()
         );
         self.focused_surface = new_focus;
-        self.ime_enabled = Some(enabled);
+        self.tip_wants_ime = has_tip;
+        self.refresh_ime_enabled();
     }
 
     /// Forward a host IME event to the focused text_input_v3 client and
@@ -231,7 +300,7 @@ impl ImeBridge {
     /// Drain the deferred `set_ime_allowed` decision, if any. Called
     /// from the winit render loop where the backend is accessible.
     pub fn take_ime_enabled(&mut self) -> Option<bool> {
-        let taken = self.ime_enabled.take();
+        let taken = self.pending_ime_enabled.take();
         if let Some(enabled) = taken {
             tracing::debug!("IME: applying set_ime_allowed({enabled})");
         }
@@ -246,9 +315,15 @@ impl ImeBridge {
     pub fn reset_on_workspace_switch(&mut self) {
         tracing::debug!("IME: reset on workspace switch");
         self.focused_surface = None;
-        self.ime_enabled = Some(false);
+        self.tip_wants_ime = false;
+        self.dbus_wants_ime = false;
         self.active_fcitx_ic = None;
         self.pending_cursor_area = None;
+        // Force re-stage of `false` even if last_staged was already
+        // false — workspace-switch expects an explicit IME off on the
+        // winit side.
+        self.pending_ime_enabled = Some(false);
+        self.last_staged_ime_enabled = false;
     }
 }
 
