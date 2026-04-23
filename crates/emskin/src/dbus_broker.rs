@@ -564,42 +564,70 @@ impl DbusBroker {
                     continue;
                 }
             };
-            // We only care about method_returns to our tracked
-            // GetNameOwner requests. Everything else (signals like
-            // NameOwnerChanged, other method_returns, errors …) is
-            // ignored — they're forwarded to the client verbatim.
-            if header.msg_type != MessageType::MethodReturn {
-                continue;
-            }
-            let Some(reply_serial) = header.reply_serial else {
-                continue;
-            };
-            let Some(looked_up) = conn.pending_name_lookups.remove(&reply_serial) else {
-                continue;
-            };
-            // GetNameOwner reply body signature is `s` — a single
-            // string that's the unique-name owner of the queried
-            // well-known.
             let body_start = total - header.body_len as usize;
             let body = &frame[body_start..];
-            let Some(owner) = parse_arg0_string(body, header.endian) else {
-                tracing::warn!(
-                    ?id,
-                    reply_serial,
-                    looked_up,
-                    "GetNameOwner reply body not a string; skipping"
-                );
-                continue;
-            };
-            tracing::info!(
-                ?id,
-                name = looked_up,
-                owner,
-                "resolved fcitx5 unique owner via GetNameOwner reply"
-            );
-            // Authoritative source — overwrites any earlier guess
-            // from the destination-capture path.
-            conn.fcitx_server_name = Some(owner);
+            match header.msg_type {
+                // Reply to an outgoing GetNameOwner we tracked:
+                // parse the single-string body to learn the unique
+                // name owner. Authoritative source — overwrites any
+                // earlier guess from the destination-capture path.
+                MessageType::MethodReturn => {
+                    let Some(reply_serial) = header.reply_serial else {
+                        continue;
+                    };
+                    let Some(looked_up) = conn.pending_name_lookups.remove(&reply_serial) else {
+                        continue;
+                    };
+                    let Some(owner) = parse_arg0_string(body, header.endian) else {
+                        tracing::warn!(
+                            ?id,
+                            reply_serial,
+                            looked_up,
+                            "GetNameOwner reply body not a string; skipping"
+                        );
+                        continue;
+                    };
+                    tracing::info!(
+                        ?id,
+                        name = looked_up,
+                        owner,
+                        "resolved fcitx5 unique owner via GetNameOwner reply"
+                    );
+                    conn.fcitx_server_name = Some(owner);
+                }
+                // `org.freedesktop.DBus.NameOwnerChanged(sss)` signal
+                // — fired by the daemon when a well-known name's
+                // unique owner changes (e.g. real fcitx5 restarted).
+                // We refresh / invalidate our cache so signals
+                // emitted after the change carry the correct sender.
+                MessageType::Signal if is_name_owner_changed_signal(&header) => {
+                    let Some((name, _old, new)) =
+                        parse_three_strings(body, header.endian)
+                    else {
+                        continue;
+                    };
+                    if !fcitx::is_fcitx_well_known(&name) {
+                        continue;
+                    }
+                    if new.is_empty() {
+                        tracing::info!(
+                            ?id,
+                            name,
+                            "fcitx5 owner went away (NameOwnerChanged, new_owner empty)"
+                        );
+                        conn.fcitx_server_name = None;
+                    } else {
+                        tracing::info!(
+                            ?id,
+                            name,
+                            new_owner = new,
+                            "fcitx5 owner changed (NameOwnerChanged)"
+                        );
+                        conn.fcitx_server_name = Some(new);
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(PumpOutcome::Active)
     }
@@ -686,6 +714,50 @@ fn is_get_name_owner_method(header: &emskin_dbus::dbus::message::Header) -> bool
     header.interface.as_deref() == Some("org.freedesktop.DBus")
         && header.member.as_deref() == Some("GetNameOwner")
         && header.signature.as_deref() == Some("s")
+}
+
+/// Recognize `org.freedesktop.DBus.NameOwnerChanged(sss)` signals
+/// from the daemon so the broker can refresh the cached fcitx5
+/// unique name after a service restart.
+fn is_name_owner_changed_signal(header: &emskin_dbus::dbus::message::Header) -> bool {
+    header.interface.as_deref() == Some("org.freedesktop.DBus")
+        && header.member.as_deref() == Some("NameOwnerChanged")
+        && header.signature.as_deref() == Some("sss")
+}
+
+/// Parse three consecutive DBus `s` args at body offset 0. Each
+/// string begins on a 4-byte alignment boundary (u32 length prefix),
+/// so successive strings are aligned relative to the body start.
+fn parse_three_strings(body: &[u8], endian: Endian) -> Option<(String, String, String)> {
+    let mut off = 0usize;
+    let s1 = read_string_advance(body, &mut off, endian)?;
+    let s2 = read_string_advance(body, &mut off, endian)?;
+    let s3 = read_string_advance(body, &mut off, endian)?;
+    Some((s1, s2, s3))
+}
+
+/// Read a DBus `s` at `*off`, advancing past the NUL terminator and
+/// aligning up to the next 4-byte boundary for the next arg.
+fn read_string_advance(body: &[u8], off: &mut usize, endian: Endian) -> Option<String> {
+    // Align `*off` up to 4.
+    *off = (*off + 3) & !3;
+    if body.len() < *off + 4 {
+        return None;
+    }
+    let arr: [u8; 4] = body[*off..*off + 4].try_into().ok()?;
+    let len = match endian {
+        Endian::Little => u32::from_le_bytes(arr),
+        Endian::Big => u32::from_be_bytes(arr),
+    } as usize;
+    *off += 4;
+    if body.len() < *off + len + 1 {
+        return None;
+    }
+    let s = std::str::from_utf8(&body[*off..*off + len])
+        .ok()?
+        .to_string();
+    *off += len + 1; // skip NUL
+    Some(s)
 }
 
 /// Parse `unix:path=/run/user/1000/bus[,guid=…]` into the filesystem
@@ -917,6 +989,91 @@ mod tests {
         broker.remove_connection(id);
     }
 
+    /// NameOwnerChanged refresh: if the broker has cached
+    /// `:1.42` as the fcitx5 owner and then the daemon broadcasts
+    /// `NameOwnerChanged("org.fcitx.Fcitx5", ":1.42", ":1.73")`
+    /// (real fcitx5 restarted), the cache must update to `:1.73`.
+    /// Otherwise every subsequent signal we emit has the stale
+    /// sender and the client drops it again.
+    #[test]
+    fn name_owner_changed_signal_refreshes_cached_fcitx_name() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("s");
+        let upstream_path = dir.path().join("upstream.sock");
+        let upstream_listener = UnixListener::bind(&upstream_path).unwrap();
+        upstream_listener.set_nonblocking(true).unwrap();
+        let (mut broker, mut client, mut upstream_peer, id) =
+            setup_pair(&session, upstream_path, &upstream_listener);
+
+        // Handshake first so is_authed() flips.
+        let handshake = b"\0AUTH EXTERNAL 30\r\nBEGIN\r\n";
+        client.write_all(handshake).unwrap();
+        for _ in 0..3 {
+            broker.pump_client_to_upstream(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        // Seed the cache by hand — same as if we'd seen the initial
+        // GetNameOwner reply.
+        broker
+            .connections
+            .get_mut(&id)
+            .unwrap()
+            .fcitx_server_name = Some(":1.42".into());
+
+        // Daemon broadcasts NameOwnerChanged after fcitx5 restart.
+        let sig = build_name_owner_changed("org.fcitx.Fcitx5", ":1.42", ":1.73");
+        upstream_peer.write_all(&sig).unwrap();
+        for _ in 0..3 {
+            broker.pump_upstream_to_client(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let c = broker.connections.get(&id).unwrap();
+        assert_eq!(c.fcitx_server_name.as_deref(), Some(":1.73"));
+
+        broker.remove_connection(id);
+    }
+
+    /// NameOwnerChanged with an empty `new_owner` means the service
+    /// disappeared — cache should be cleared so we stop using a
+    /// dangling sender name.
+    #[test]
+    fn name_owner_changed_to_empty_clears_cache() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("s");
+        let upstream_path = dir.path().join("upstream.sock");
+        let upstream_listener = UnixListener::bind(&upstream_path).unwrap();
+        upstream_listener.set_nonblocking(true).unwrap();
+        let (mut broker, mut client, mut upstream_peer, id) =
+            setup_pair(&session, upstream_path, &upstream_listener);
+
+        let handshake = b"\0AUTH EXTERNAL 30\r\nBEGIN\r\n";
+        client.write_all(handshake).unwrap();
+        for _ in 0..3 {
+            broker.pump_client_to_upstream(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        broker
+            .connections
+            .get_mut(&id)
+            .unwrap()
+            .fcitx_server_name = Some(":1.42".into());
+
+        let sig = build_name_owner_changed("org.fcitx.Fcitx5", ":1.42", "");
+        upstream_peer.write_all(&sig).unwrap();
+        for _ in 0..3 {
+            broker.pump_upstream_to_client(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let c = broker.connections.get(&id).unwrap();
+        assert_eq!(c.fcitx_server_name, None);
+
+        broker.remove_connection(id);
+    }
+
     /// Non-fcitx5 GetNameOwner lookups (e.g. asking about
     /// `org.freedesktop.Notifications`) should NOT be tracked — the
     /// broker only cares about fcitx5 names.
@@ -1068,6 +1225,37 @@ mod tests {
         msg.extend_from_slice(&(body.len() as u32).to_le_bytes());
         // Our own serial for this reply — any non-zero value works.
         msg.extend_from_slice(&9999u32.to_le_bytes());
+        msg.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&fields);
+        pad_to(&mut msg, 8);
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    /// A DBus daemon signal `NameOwnerChanged(s, s, s)` announcing an
+    /// ownership change for `name` from `old_owner` to `new_owner`.
+    fn build_name_owner_changed(name: &str, old_owner: &str, new_owner: &str) -> Vec<u8> {
+        let mut fields = Vec::new();
+        push_string_field(&mut fields, 1, "o", "/org/freedesktop/DBus");
+        push_string_field(&mut fields, 2, "s", "org.freedesktop.DBus");
+        push_string_field(&mut fields, 3, "s", "NameOwnerChanged");
+        push_string_field(&mut fields, 7, "s", "org.freedesktop.DBus"); // SENDER
+        push_signature_field(&mut fields, 8, "sss");
+
+        let mut body = Vec::new();
+        for s in [name, old_owner, new_owner] {
+            while !body.len().is_multiple_of(4) {
+                body.push(0);
+            }
+            body.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            body.extend_from_slice(s.as_bytes());
+            body.push(0);
+        }
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&[b'l', 4, 0, 1]); // type=4 signal
+        msg.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&1234u32.to_le_bytes()); // serial
         msg.extend_from_slice(&(fields.len() as u32).to_le_bytes());
         msg.extend_from_slice(&fields);
         pad_to(&mut msg, 8);
