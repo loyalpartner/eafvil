@@ -11,7 +11,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use emskin::xwayland_satellite::sockets::{clear_out_pending_connections, Unlink};
+use emskin::xwayland_satellite::sockets::{
+    clear_out_pending_connections, format_lock_body, x11_lock_path, Unlink,
+};
 use emskin::xwayland_satellite::{
     build_spawn_command, setup_connection, test_ondemand, SpawnConfig, X11Sockets,
 };
@@ -85,23 +87,125 @@ fn setup_connection_binds_free_display_and_exposes_paths() {
     );
 }
 
+/// Pick a "definitely dead" PID by spawning `true` and waiting on it.
+/// The kernel recycles PIDs, but the test only needs the PID to be dead
+/// *right now* — `kill(pid, 0)` returns ESRCH for exited-and-reaped
+/// processes on Linux. Extremely slim race window where the kernel
+/// recycles this specific PID to another process between `wait()` and
+/// `pick_x11_display()` call; test would false-pass if it happened, not
+/// false-fail, so harmless.
+fn spawn_and_reap() -> u32 {
+    let mut child = std::process::Command::new("true")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn /bin/true");
+    let pid = child.id();
+    let _ = child.wait();
+    pid
+}
+
+/// Write an X11 lock file containing `pid` at the path for display
+/// `display`. Reuses the production helpers so test fixtures stay in
+/// sync with the format the scanner parses.
+fn write_lock(display: u32, pid: u32) -> PathBuf {
+    let path = PathBuf::from(x11_lock_path(display));
+    // Delete first in case a previous run left one here at this display.
+    let _ = fs::remove_file(&path);
+    fs::write(&path, format_lock_body(pid)).expect("write lock file");
+    path
+}
+
 #[test]
-fn setup_connection_skips_already_locked_display() {
+fn stale_lock_from_dead_pid_gets_cleaned_up() {
+    // Regression guard for "no free X11 display number found" when every
+    // lock in the scan window belongs to dead PIDs. pick_x11_display must
+    // detect the dead owner and reclaim the slot.
     let start = test_display_start();
-    let blocked_lock = PathBuf::from(format!("/tmp/.X{start}-lock"));
+    let dead_pid = spawn_and_reap();
+    let stale_lock = write_lock(start, dead_pid);
+    let _cleanup = Unlink::new(stale_lock.clone());
 
-    // Guard regardless of outcome.
-    let _cleanup = Unlink::new(blocked_lock.clone());
+    let sockets =
+        setup_connection(start).expect("stale lock should be reclaimed, not reported as blocked");
+    assert_eq!(
+        sockets.display, start,
+        "setup should reclaim the stale slot at :{start}, got :{}",
+        sockets.display
+    );
 
-    // Pre-create the lock so `start` is unusable. `O_EXCL|O_CREAT` in the
-    // impl must cause `pick_x11_display` to advance.
-    fs::File::create(&blocked_lock).unwrap();
+    // The lock file should now hold *our* PID, not the dead one. Read the
+    // contents back and assert that it at least parses to something other
+    // than the old dead PID.
+    let contents = fs::read_to_string(&stale_lock).unwrap_or_default();
+    let written_pid = contents.trim().parse::<u32>().ok();
+    assert_ne!(
+        written_pid,
+        Some(dead_pid),
+        "reclaimed lock must not still contain the dead PID {dead_pid}"
+    );
+}
 
-    let sockets = setup_connection(start).expect("should advance past locked display");
+#[test]
+fn stale_lock_with_corrupt_content_gets_cleaned_up() {
+    // A lock file that fails to parse as a PID is a leftover from something
+    // that didn't follow the convention (or got truncated). Treat as stale.
+    let start = test_display_start();
+    let stale_lock = PathBuf::from(x11_lock_path(start));
+    let _ = fs::remove_file(&stale_lock);
+    fs::write(&stale_lock, "garbage not-a-pid\n").unwrap();
+    let _cleanup = Unlink::new(stale_lock.clone());
+
+    let sockets = setup_connection(start).expect("corrupt lock should be reclaimed as stale");
+    assert_eq!(sockets.display, start);
+}
+
+#[test]
+fn live_pid_lock_is_respected_and_scan_advances() {
+    // Converse of the stale case — a lock owned by a LIVE PID must NOT be
+    // reclaimed. Use our own PID; we are obviously alive.
+    let start = test_display_start();
+    let live_lock = write_lock(start, std::process::id());
+    let _cleanup = Unlink::new(live_lock.clone());
+
+    let sockets =
+        setup_connection(start).expect("scan should advance past the live-PID lock, not fail");
     assert!(
         sockets.display > start,
-        "should skip locked :{start}, got :{}",
+        "live-PID lock at :{start} must be respected; got display :{} (should be > {start})",
         sockets.display
+    );
+    // The original lock file must still exist (we didn't delete it).
+    assert!(
+        live_lock.exists(),
+        "live-PID lock file was deleted — the reclaim logic must not touch locks with live owners"
+    );
+}
+
+#[test]
+fn multiple_consecutive_stale_locks_all_reclaimable() {
+    // Models the production failure: the first N display slots all have
+    // dead locks. pick_x11_display must walk forward, cleaning each stale
+    // lock it encounters, and succeed within the scan window.
+    let start = test_display_start();
+    let dead_pid = spawn_and_reap();
+
+    // Create 5 stale locks at `start..start+5`. Can't use spawn_and_reap
+    // for each because PIDs would differ, but having them all point at the
+    // same dead PID is still a realistic stale-lock scenario.
+    let _cleanups: Vec<_> = (0..5)
+        .map(|offset| {
+            let path = write_lock(start + offset, dead_pid);
+            Unlink::new(path)
+        })
+        .collect();
+
+    let sockets = setup_connection(start).expect(
+        "pick_x11_display should reclaim the first stale slot encountered, not walk past all 5",
+    );
+    assert_eq!(
+        sockets.display, start,
+        "first slot :{start} should be reclaimed immediately"
     );
 }
 

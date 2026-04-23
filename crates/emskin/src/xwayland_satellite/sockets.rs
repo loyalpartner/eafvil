@@ -12,8 +12,43 @@ use std::os::unix::net::{SocketAddr, UnixListener};
 use std::path::PathBuf;
 
 const X11_TMP_UNIX_DIR: &str = "/tmp/.X11-unix";
-const MAX_DISPLAY_ATTEMPTS: u32 = 50;
+/// Upper bound on consecutive slots to scan. Bumped from 50 after a
+/// real-world incident where 50 stale `/tmp/.X*-lock` files from prior
+/// e2e runs filled the 0..49 range exactly and the old "any
+/// AlreadyExists = blocked" scanner gave up. 256 is comfortably above
+/// any realistic concurrent-compositor count while still bounded so a
+/// genuinely full system fails fast.
+const MAX_DISPLAY_ATTEMPTS: u32 = 256;
 const MAX_SOCKET_BIND_RETRIES: u32 = 50;
+
+/// Filesystem path of the `/tmp/.X<n>-lock` file for display `:n`.
+pub fn x11_lock_path(n: u32) -> String {
+    format!("/tmp/.X{n}-lock")
+}
+
+/// Filesystem path of the unix-domain socket `/tmp/.X11-unix/X<n>` for
+/// display `:n`.
+pub fn x11_socket_path(n: u32) -> String {
+    format!("{X11_TMP_UNIX_DIR}/X{n}")
+}
+
+/// X11 lock-file body format per Xorg convention: space-padded 10-char
+/// decimal PID followed by newline (11 bytes total), matching what
+/// `_XSERVTransMakeAllCOTSServerListeners` writes.
+pub fn format_lock_body(pid: u32) -> String {
+    format!("{pid:>10}\n")
+}
+
+/// Probe whether a Unix PID still names a live process. Returns `true`
+/// when the kernel confirms the pid exists (running or zombie), `false`
+/// otherwise. Shared helper so both the stale-lock reclaim path here
+/// and the `EmacsState::set_child` zombie-safety tests use one
+/// implementation with one SAFETY comment.
+pub fn pid_alive(pid: u32) -> bool {
+    // SAFETY: `libc::kill(pid, 0)` sends no signal; it is a documented
+    // probe of pid validity. No side effects on the target process.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
 
 #[derive(Debug)]
 pub enum SetupError {
@@ -105,22 +140,85 @@ fn ensure_x11_unix_dir() -> Result<(), SetupError> {
 }
 
 /// Atomically claim an X display number by creating `/tmp/.X<N>-lock` with
-/// `O_EXCL|O_CREAT`. Returns `(display, lock_file, guard)`.
+/// `O_EXCL|O_CREAT`. Stale locks (owner PID is dead, or contents don't
+/// parse) are detected and cleared before giving up on a slot — this
+/// mirrors what Xorg's `_XSERVTransMakeAllCOTSServerListeners` does and
+/// prevents accumulated e2e-test crashes from permanently blocking
+/// display numbers.
+///
+/// Returns `(display, lock_file, guard)`.
 fn pick_x11_display(start: u32) -> Result<(u32, fs::File, Unlink), SetupError> {
     for n in start..start + MAX_DISPLAY_ATTEMPTS {
-        let lock_path = format!("/tmp/.X{n}-lock");
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o444)
-            .open(&lock_path)
-        {
-            Ok(lock_fd) => return Ok((n, lock_fd, Unlink(PathBuf::from(lock_path)))),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(SetupError::Io(e)),
+        if let Some((fd, guard)) = try_claim_slot(n)? {
+            return Ok((n, fd, guard));
         }
     }
     Err(SetupError::NoFreeDisplay)
+}
+
+/// Try to claim display slot `n`. Returns `Ok(Some(..))` on success,
+/// `Ok(None)` if the slot is held by a live owner or we couldn't
+/// reclaim it, `Err` on a genuinely unexpected I/O error.
+fn try_claim_slot(n: u32) -> Result<Option<(fs::File, Unlink)>, SetupError> {
+    let lock_path = x11_lock_path(n);
+    match try_create_lock(&lock_path) {
+        Ok(slot) => Ok(Some(slot)),
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(SetupError::Io(e)),
+        Err(_) => {
+            if !is_stale_lock(&lock_path) {
+                return Ok(None);
+            }
+            tracing::debug!(
+                "reclaiming stale X11 display :{n} (lock file has dead or unparseable owner)"
+            );
+            if let Err(e) = reclaim_stale_display(n) {
+                tracing::warn!("stale-lock reclaim of :{n} failed: {e}");
+                return Ok(None);
+            }
+            Ok(try_create_lock(&lock_path).ok())
+        }
+    }
+}
+
+fn try_create_lock(lock_path: &str) -> std::io::Result<(fs::File, Unlink)> {
+    let fd = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o444)
+        .open(lock_path)?;
+    // Write our own PID so a future peer scanning this slot can stale-
+    // check us in reverse. Best-effort — the lock-as-flag is what
+    // matters for mutual exclusion.
+    let _ = fs::write(lock_path, format_lock_body(std::process::id()));
+    Ok((fd, Unlink(PathBuf::from(lock_path))))
+}
+
+/// A lock is "stale" if it exists but its owner no longer does. Two
+/// cases qualify: the PID inside parses and its owner is gone, or the
+/// file is unparseable / empty (a corrupt leftover that no live
+/// process considers its own anymore).
+fn is_stale_lock(path: &str) -> bool {
+    let Ok(contents) = fs::read_to_string(path) else {
+        // Can't even read the file (permissions? race?) — don't delete.
+        return false;
+    };
+    let Some(pid) = contents.trim().parse::<u32>().ok().filter(|p| *p > 0) else {
+        return true;
+    };
+    !pid_alive(pid)
+}
+
+/// Remove the stale lock plus any leftover unix socket for display `n`.
+/// The abstract Linux socket (`@/tmp/.X11-unix/X<n>`) lives in the
+/// kernel's abstract namespace and vanishes automatically with its
+/// owner's death, so we don't need to touch it.
+fn reclaim_stale_display(n: u32) -> std::io::Result<()> {
+    fs::remove_file(x11_lock_path(n))?;
+    match fs::remove_file(x11_socket_path(n)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -295,16 +295,10 @@ mod tests {
             .expect("spawn sleep 60 for test")
     }
 
-    /// `libc::kill(pid, 0)` sends no signal; it probes pid validity.
-    /// Returns 0 if the process exists (dead-zombie or alive), ESRCH
-    /// otherwise. After `set_child`'s internal `kill + wait`, the pid
-    /// must be fully reaped — not even a zombie — so this returns
-    /// `false`.
-    fn pid_alive(pid: u32) -> bool {
-        // SAFETY: Signal 0 is a documented no-op probe for libc::kill;
-        // it has no side effects on the target process.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
+    // `pid_alive` lives in `xwayland_satellite::sockets` (used there by
+    // the stale-X11-lock reclaim path); import it here rather than keep
+    // a second copy.
+    use crate::xwayland_satellite::sockets::pid_alive;
 
     #[test]
     fn set_child_kills_and_reaps_previous_live_child() {
