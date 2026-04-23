@@ -36,9 +36,16 @@ use std::path::{Path, PathBuf};
 
 use emskin_dbus::broker::{apply_cursor_rewrites, state::ConnectionState};
 use emskin_dbus::dbus::encode::{body_preedit, body_string, Signal};
-use emskin_dbus::fcitx::{
-    self, reply::next_nonzero, FcitxMethod, IcRegistry, INPUT_CONTEXT_IFACE,
-};
+use emskin_dbus::fcitx::{self, reply::next_nonzero, FcitxMethod, IcRegistry, INPUT_CONTEXT_IFACE};
+
+/// Sender name we stamp on synthesized signals. GDBus (and most other
+/// DBus libraries) filter incoming signals against the `sender=`
+/// clause of AddMatch rules — WeChat / GTK IM module's match rules
+/// typically look like `sender='org.fcitx.Fcitx5'`, so emitting with
+/// an empty sender causes the client library to drop the signal on
+/// the floor. Using the well-known name (not a `:1.N` unique name)
+/// matches what clients configure.
+const SIGNAL_SENDER: &str = "org.fcitx.Fcitx5";
 
 /// Newtype for per-connection id. Generated sequentially by the broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -431,10 +438,11 @@ impl DbusBroker {
             interface: INPUT_CONTEXT_IFACE,
             member: "CommitString",
             destination: None,
-            sender: None,
+            sender: Some(SIGNAL_SENDER),
             body: body_string(text),
         }
         .encode();
+        tracing::info!(?conn, ic_path, text, "emit CommitString signal");
         c.client_out.extend(bytes);
         Self::try_flush(&mut c.client, &mut c.client_out)
     }
@@ -460,10 +468,11 @@ impl DbusBroker {
             interface: INPUT_CONTEXT_IFACE,
             member: "UpdateFormattedPreedit",
             destination: None,
-            sender: None,
+            sender: Some(SIGNAL_SENDER),
             body: body_preedit(text, cursor.unwrap_or(-1)),
         }
         .encode();
+        tracing::info!(?conn, ic_path, text, "emit UpdateFormattedPreedit signal");
         c.client_out.extend(bytes);
         Self::try_flush(&mut c.client, &mut c.client_out)
     }
