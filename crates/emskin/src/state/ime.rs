@@ -236,7 +236,7 @@ impl ImeBridge {
 
         if want_allowed != self.last_applied_ime_allowed {
             window.set_ime_allowed(want_allowed);
-            tracing::info!("winit.set_ime_allowed({want_allowed})");
+            tracing::debug!("winit.set_ime_allowed({want_allowed})");
             self.last_applied_ime_allowed = want_allowed;
         }
 
@@ -247,7 +247,7 @@ impl ImeBridge {
                     winit_crate::dpi::LogicalPosition::new(pos[0] as f64, pos[1] as f64),
                     winit_crate::dpi::LogicalSize::new(size[0] as f64, size[1] as f64),
                 );
-                tracing::info!(
+                tracing::debug!(
                     reason = if activating { "activating" } else { "changed" },
                     "winit.set_ime_cursor_area({}, {}, {}, {})",
                     pos[0],
@@ -370,7 +370,7 @@ impl ImeBridge {
             [origin[0] + rect[0], origin[1] + rect[1]],
             [rect[2].max(1), rect[3].max(1)],
         );
-        tracing::info!(
+        tracing::debug!(
             ?conn,
             ?ic_path,
             client_rect = ?rect,
@@ -489,7 +489,7 @@ impl ImeBridge {
                 focused: true,
             } => {
                 let origin = app_origin.unwrap_or([0, 0]);
-                tracing::info!(?conn, ?ic_path, ?origin, "fcitx IC FocusIn → DBus owner");
+                tracing::debug!(?conn, ?ic_path, ?origin, "fcitx IC FocusIn → DBus owner");
                 let ti = seat.text_input();
                 self.set_owner(
                     ImeOwner::Dbus {
