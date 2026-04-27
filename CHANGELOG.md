@@ -3,9 +3,22 @@
 All notable changes to emskin are documented here.
 Generated from conventional commits via git-cliff.
 
+## [0.3.12] - 2026-04-27
+
+### Bug Fixes
+- Re-evaluate host IME after every tick to catch late text_input bind (#62)
+- Reclaim stale X11 display locks on startup
+- Set app_id / WM_CLASS to emskin
+
+### Features
+- In-process fcitx5 broker + ImeOwner state machine (#68)
+
+### Refactor
+- Extract IME/workspace substructs + reorganize into state/ (#59)
 ## [0.3.11] - 2026-04-21
 
 ### Bug Fixes
+- Promote xwayland-satellite from optdepends to depends
 - Degrade gracefully when no system font is installed
 - Use Window::toplevel() to avoid non-exhaustive match under workspace clippy
 - Keep Emacs at bottom of Space to stop app white-screen on resize
