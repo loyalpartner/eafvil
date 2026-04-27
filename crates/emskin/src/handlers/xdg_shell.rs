@@ -360,25 +360,27 @@ impl XdgShellHandler for EmskinState {
 /// Whether a toplevel should map as a floating dialog (centered, no
 /// AppManager / no Emacs buffer) instead of an embedded app window.
 ///
-/// Inspired by sway's `wants_floating` (sway/desktop/xdg_shell.c:228)
-/// — `parent.is_some() ∨ (min == max && both > 0)` — but with a size
-///   sanity guard: a fully-fixed window only counts as a dialog when
-///   its dimensions are less than half the output in both axes.
-///   Without that guard we'd hijack Qt/Electron main windows that
-///   ship with `setFixedSize()` (the wechat startup window is one of
-///   these).
+/// Direct port of sway's `wants_floating` (sway/desktop/xdg_shell.c:228):
 ///
-/// Wechat's login window arrives via `xwayland-satellite`, which
-///   faithfully forwards `WM_NORMAL_HINTS` →
-///   `xdg_toplevel.set_min_size` + `set_max_size`
-///   (xwayland-satellite/src/server/mod.rs:978). The X11
-///   `WM_TRANSIENT_FOR` propagation also lives there but the typical
-///   "first window of the app" doesn't set it, so we can't rely on
-///   `set_parent` alone.
+/// ```c
+/// return (min_w != 0 && min_h != 0 &&
+///         (min_w == max_w || min_h == max_h))
+///        || toplevel->parent;
+/// ```
 ///
-/// Both `parent` and the cached min/max sizes are populated only after
-/// the client's initial dispatch burst finishes — call this from the
-/// drain pass in `tick::process_pending_app_toplevels`, never inside
+/// Note the OR between `min_w == max_w` and `min_h == max_h` — a single
+/// pinned axis is enough. We previously required both axes pinned plus
+/// a 600×500 hard size cap, but the cap kept misclassifying wechat's
+/// 560×760 login window (HiDPI doubles the X-side `WM_NORMAL_HINTS`
+/// satellite forwards) as an embedded app.
+///
+/// X11 clients arrive through `xwayland-satellite`, which forwards
+/// `WM_NORMAL_HINTS` → `xdg_toplevel.set_min_size` + `set_max_size`
+/// (xwayland-satellite/src/server/mod.rs:978) and `WM_TRANSIENT_FOR` →
+/// `set_parent`. Both `parent` and the cached min/max sizes are
+/// populated only after the client's initial dispatch burst finishes —
+/// call this from the drain pass in
+/// `tick::process_pending_app_toplevels`, never inside
 /// `XdgShellHandler::new_toplevel`.
 pub fn wants_floating(_state: &EmskinState, surface: &ToplevelSurface) -> bool {
     let parent = with_states(surface.wl_surface(), |states| {
@@ -397,20 +399,7 @@ pub fn wants_floating(_state: &EmskinState, surface: &ToplevelSurface) -> bool {
         let current = cached.current();
         (current.min_size, current.max_size)
     });
-    let fully_fixed = min.w > 0 && min.h > 0 && min.w == max.w && min.h == max.h;
-    if !fully_fixed {
-        return false;
-    }
-
-    // Hard size cap (not relative to output): typical login / file
-    // chooser / about boxes are well under 600×500. Anything larger
-    // is treated as a normal embedded app even if min == max — that
-    // covers Qt main windows that happen to be `setFixedSize`'d
-    // (the wechat *main* window and many "kiosk-style" apps), where
-    // the (0,0) configure of the dialog path would leave them blank.
-    const DIALOG_MAX_W: i32 = 600;
-    const DIALOG_MAX_H: i32 = 500;
-    min.w <= DIALOG_MAX_W && min.h <= DIALOG_MAX_H
+    min.w > 0 && min.h > 0 && (min.w == max.w || min.h == max.h)
 }
 
 /// Extract a short display name from an Emacs frame title for the workspace bar.

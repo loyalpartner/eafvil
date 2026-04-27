@@ -262,9 +262,21 @@ fn process_pending_app_toplevels(state: &mut EmskinState) {
             continue;
         }
         let floating = crate::handlers::xdg_shell::wants_floating(state, &surface);
+        // Log the full set of inputs the heuristic actually sees, so a
+        // misclassified login window (wechat / feishu / file pickers)
+        // is debuggable from the journal without rebuilding emskin.
+        let (title, app_id, min, max) = inspect_toplevel_for_log(&surface);
         tracing::info!(
-            "embedded toplevel classification: floating={floating} parent={}",
-            surface.parent().is_some(),
+            target: "emskin::dialog",
+            floating,
+            has_parent = surface.parent().is_some(),
+            ?title,
+            ?app_id,
+            min_w = min.w,
+            min_h = min.h,
+            max_w = max.w,
+            max_h = max.h,
+            "embedded toplevel classification",
         );
         if floating {
             promote_floating_dialog(state, surface, window);
@@ -272,6 +284,35 @@ fn process_pending_app_toplevels(state: &mut EmskinState) {
             register_embedded_app(state, surface, window);
         }
     }
+}
+
+/// Read the inputs that `wants_floating` consults, for diagnostic
+/// logging. Pure side-effect-free read of the toplevel's cached state.
+fn inspect_toplevel_for_log(
+    surface: &smithay::wayland::shell::xdg::ToplevelSurface,
+) -> (
+    Option<String>,
+    Option<String>,
+    smithay::utils::Size<i32, smithay::utils::Logical>,
+    smithay::utils::Size<i32, smithay::utils::Logical>,
+) {
+    use smithay::wayland::compositor::with_states;
+    use smithay::wayland::shell::xdg::{SurfaceCachedState, XdgToplevelSurfaceData};
+
+    let (title, app_id) = with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|d| d.lock().ok())
+            .map(|d| (d.title.clone(), d.app_id.clone()))
+            .unwrap_or((None, None))
+    });
+    let (min, max) = with_states(surface.wl_surface(), |states| {
+        let mut cached = states.cached_state.get::<SurfaceCachedState>();
+        let current = cached.current();
+        (current.min_size, current.max_size)
+    });
+    (title, app_id, min, max)
 }
 
 /// Marker stored in a floating dialog's `Window::user_data`. The
