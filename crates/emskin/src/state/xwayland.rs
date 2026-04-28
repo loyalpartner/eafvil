@@ -41,14 +41,18 @@ pub struct XwaylandState {
 impl XwaylandState {
     // -- Display number --------------------------------------------
 
-    /// Cache the display number once XWayland reports Ready. The field
-    /// is currently write-only at the public API level (no downstream
-    /// reader) — retained because the stashing site exports the same
-    /// value to the `DISPLAY` env var and IPC notification, so the
-    /// cache exists to support a future consumer without touching
-    /// main's event-loop bootstrap.
+    /// Cache the display number once XWayland reports Ready.
     pub fn set_display(&mut self, display: u32) {
         self.display = Some(display);
+    }
+
+    /// Read the cached display number, if XWayland came up. Returned
+    /// to `main`'s spawn path so the child gets `DISPLAY=:N` only when
+    /// satellite actually exists; without it, child inherits no
+    /// `DISPLAY` and X11-only programs (gtk3 Emacs) fail loudly
+    /// instead of silently trying to draw on the host X server.
+    pub fn display(&self) -> Option<u32> {
+        self.display
     }
 
     // -- Supervisor ------------------------------------------------

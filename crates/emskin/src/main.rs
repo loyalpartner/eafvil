@@ -202,6 +202,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cli.xwayland_satellite_bin,
     );
 
+    // Spawn the parked child (Emacs by default) regardless of whether
+    // XWayland came up. Without satellite, `display = None` and the
+    // child gets no `DISPLAY` — pgtk Emacs and Wayland-native programs
+    // are unaffected; X11-only programs fail loudly. Previously this
+    // spawn lived inside `start_xwayland_satellite`'s success path,
+    // which silently dropped the parked command on systems missing
+    // `xwayland-satellite` and left the splash spinning forever.
+    if let Some(pc) = state.xwayland.take_pending_command() {
+        let display = state.xwayland.display();
+        spawn_child(&pc.command, &pc.args, display, pc.standalone, &mut state);
+    }
+
     // Launch the external workspace bar (if configured). Done after the
     // Wayland socket exists so the child inherits WAYLAND_DISPLAY via the
     // parent environment.
@@ -447,7 +459,7 @@ fn drop_dbus_connection(state: &mut EmskinState, id: emskin_dbus::ConnId, side: 
 fn spawn_child(
     command: &str,
     args: &[String],
-    x_display: u32,
+    x_display: Option<u32>,
     standalone: bool,
     state: &mut EmskinState,
 ) {
@@ -474,16 +486,31 @@ fn spawn_child(
 
     full_args.extend_from_slice(args);
 
+    let display_log = match x_display {
+        Some(d) => format!(":{d}"),
+        None => "<none>".to_string(),
+    };
     tracing::info!(
-        "Spawning: {command} {full_args:?} (WAYLAND_DISPLAY={socket_name} DISPLAY=:{x_display})"
+        "Spawning: {command} {full_args:?} (WAYLAND_DISPLAY={socket_name} DISPLAY={display_log})"
     );
     let mut cmd = std::process::Command::new(command);
     cmd.args(&full_args)
         .env("WAYLAND_DISPLAY", socket_name)
-        .env("DISPLAY", format!(":{x_display}"))
         // Ensure child apps prefer Wayland even when host is X11.
         .env("XDG_SESSION_TYPE", "wayland")
         .env("XDG_SESSION_DESKTOP", "emskin");
+    match x_display {
+        // Satellite came up — point children at our X socket.
+        Some(d) => {
+            cmd.env("DISPLAY", format!(":{d}"));
+        }
+        // No satellite — strip any inherited DISPLAY so X11-only
+        // children fail fast instead of silently rendering on the
+        // host X server.
+        None => {
+            cmd.env_remove("DISPLAY");
+        }
+    }
     // Redirect the session bus through emskin-dbus-proxy (if running) so
     // embedded apps' IME cursor-position calls are translated into
     // emskin-local coordinates before they reach fcitx5 on the host.
@@ -691,10 +718,9 @@ fn start_xwayland_satellite(
         .send(ipc::OutgoingMessage::XWaylandReady { display });
     tracing::info!("xwayland-satellite: socket ready on {display_name}");
 
-    // Spawn pending Emacs now that both WAYLAND_DISPLAY and DISPLAY are set.
-    if let Some(pc) = state.xwayland.take_pending_command() {
-        spawn_child(&pc.command, &pc.args, display, pc.standalone, state);
-    }
+    // Pending child is spawned by `main` after this fn returns, so the
+    // satellite-missing path (early return above) can still launch it
+    // without DISPLAY.
 }
 
 fn register_clipboard_source(
